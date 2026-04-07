@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "HH Auto Response",
+  "version": "1.0",
+  "description": "Auto responses on hh.ru",
+  "permissions": ["activeTab", "scripting", "tabs"],
+  "host_permissions": ["*://*.hh.ru/*"],
+  "action": {
+    "default_title": "Run HH Auto"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
