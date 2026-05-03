@@ -27,14 +27,14 @@ const CONFIG = {
 Почему именно я? Ищу вакансию, где смогу применить свой управленческий, архитектурный и технический опыт. Готов решать комплексные задачи, требующие аналитического мышления, управления процессами и командами, умения вникать в детали и принимать решения в условиях неполной информации. Мне интересна смена предметной области — положительно отношусь к необходимости учиться новому.
 Буду рад обсудить, как мой опыт поможет достижению ваших бизнес-целей.
 В настоящее время проживаю в г. Москва, имею военный билет.
-Желаемый уровень заработной платы — 350 000 рублей.
+Желаемый уровень заработной платы — 300 000 рублей.
 Спасибо за внимание!
 Вихров Денис Валерьевич
 for.vikhrov@mail.ru
 `
 };
 
-// Слушатель сообщений от content scripts
+// Слушатель сообщений от инжектированных скриптов (вкладки вакансий)
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('[MESSAGE] Получено сообщение: ' + JSON.stringify(message));
   console.log('[MESSAGE] sender.tab.id = ' + (sender.tab ? sender.tab.id : 'undefined'));
@@ -120,19 +120,10 @@ function selectResumeByRule(vacancyTitle) {
 
 // Основная функция автоматизации
 async function startAutomation() {
-  console.log('=== Начало работы HH Auto Extension ===');
-  
   try {
     // Шаг 1: Проверка авторизации
     const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
     console.log('Текущая вкладка: ' + currentTab.url);
-    
-    await chrome.scripting.executeScript({
-      target: { tabId: currentTab.id },
-      func: () => {
-        console.log('Расширение HH Auto начало работу');
-      }
-    });
     
     const authResult = await chrome.scripting.executeScript({
       target: { tabId: currentTab.id },
@@ -217,7 +208,7 @@ async function startAutomation() {
     // Обрабатываем каждое резюме
     for (let r = 0; r < resumeList.length; r++) {
       const currentResumeName = resumeList[r];
-      console.log('\n=== Обработка резюме ' + (r+1) + '/' + resumeList.length + ': ' + currentResumeName + ' ===');
+      console.log('=== Обработка резюме ' + (r+1) + '/' + resumeList.length + ': ' + currentResumeName + ' ===');
       
       const resumeLinkResult = await chrome.scripting.executeScript({
         target: { tabId: resumeTab.id },
@@ -332,7 +323,7 @@ async function startAutomation() {
       }
       
       const vacanciesToProcess = uniqueVacancies.slice(0, CONFIG.maxVacancies);
-      console.log('Вакансий для обработки: ' + vacanciesToProcess.length);
+      console.log('Найдено ' + vacanciesToProcess.length + ' уникальных вакансий');
       
       // Обрабатываем каждую вакансию
       for (let i = 0; i < vacanciesToProcess.length; i++) {
@@ -342,117 +333,92 @@ async function startAutomation() {
         const shouldExclude = CONFIG.excludeKeywords.some(keyword => titleLower.includes(keyword.toLowerCase()));
         
         if (shouldExclude) {
-          console.log(vacancy.title + ' =пропущено=');
+          console.log(vacancy.title + ' =пропущено= в соответствии с шаг7 ТЗ');
           continue;
         }
         
-        console.log('\n--- Обрабатываю вакансию ' + (i+1) + '/' + vacanciesToProcess.length + ': ' + vacancy.title);
+        console.log('Обрабатываю вакансию ' + (i+1) + '/' + CONFIG.maxVacancies + ': ' + vacancy.title);
         console.log('URL: ' + vacancy.href);
         
         const selectedResume = selectResumeByRule(vacancy.title);
         console.log('Выбрано резюме: ' + selectedResume);
         
-        console.log('Создаю вкладку для вакансии...');
+console.log('Создаю вкладку для вакансии');
         const vacancyDetailTab = await chrome.tabs.create({ 
           url: vacancy.href,
-          active: true
+          active: false
         });
         console.log('Создана вкладка id=' + vacancyDetailTab.id);
         
-        // Ждём загрузки вкладки
-        console.log('Жду загрузки вкладки...');
         await waitForTabLoad(vacancyDetailTab.id);
-        console.log('Вкладка загружена');
-        
-        // Дополнительная задержка
         await new Promise(resolve => setTimeout(resolve, 3000));
-        console.log('Дождался инициализации страницы');
         
         // Обрабатываем вакансию
         try {
-          console.log('[VACANCY ' + (i+1) + '] Начинаю инжекцию скрипта для нажатия кнопки...');
           
           let clickResult;
           try {
-            clickResult = await chrome.scripting.executeScript({
+clickResult = await chrome.scripting.executeScript({
               target: { tabId: vacancyDetailTab.id },
               func: () => {
-                console.log('[INJECT] Скрипт начал выполнение');
-                console.log('[INJECT] Текущий URL: ' + window.location.href);
-                
                 const respondButtons = document.querySelectorAll('button, a');
-                console.log('[INJECT] Найдено кнопок и ссылок: ' + respondButtons.length);
-                
                 let respondButton = null;
                 
                 for (const btn of respondButtons) {
                   const text = btn.textContent.toLowerCase().trim();
                   if (text === 'откликнуться') {
                     respondButton = btn;
-                    console.log('[INJECT] Нашёл кнопку "откликнуться"');
                     break;
                   }
                 }
                 
                 if (!respondButton) {
-                  console.log('[INJECT] Кнопка =откликнуться= не найдена');
+                  console.log('КНОПКА_ОТКЛИКНУТЬСЯ_НЕ_НАЙДЕНА');
                   chrome.runtime.sendMessage({ action: 'closeTab', reason: 'кнопка откликнуться не найдена' });
                   return false;
                 }
                 
-                console.log('[INJECT] кнопку =откликнуться= нашел, сейчас буду нажимать');
+                console.log('кнопку =откликнуться= нашел, сейчас буду нажимать');
                 respondButton.click();
-                console.log('[INJECT] Нажал на кнопку "откликнуться"');
+                console.log('после нажатия на =откликнуться= все загружено успешно');
                 return true;
               }
             });
             
-            console.log('[VACANCY ' + (i+1) + '] Результат инжекции: ' + JSON.stringify(clickResult));
-            
             if (!clickResult || !clickResult[0]) {
-              console.log('[VACANCY ' + (i+1) + '] Ошибка: clickResult пустой');
+              console.log('Ошибка: clickResult пустой');
               await chrome.tabs.remove(vacancyDetailTab.id);
               continue;
             }
             
-            console.log('[VACANCY ' + (i+1) + '] Результат нажатия кнопки: ' + (clickResult[0].result ? 'успешно' : 'ошибка'));
-            
             if (!clickResult[0].result) {
-              console.log('[VACANCY ' + (i+1) + '] Не удалось нажать кнопку "откликнуться", пропускаю вакансию');
+              console.log('Не удалось нажать кнопку "откликнуться", пропускаю вакансию');
               await chrome.tabs.remove(vacancyDetailTab.id);
               continue;
             }
           } catch (injectError) {
-            console.log('[VACANCY ' + (i+1) + '] Ошибка при инжекции скрипта: ' + injectError.message);
-            console.log('[VACANCY ' + (i+1) + '] Стек: ' + injectError.stack);
+            console.log('Ошибка при инжекции скрипта: ' + injectError.message);
             await chrome.tabs.remove(vacancyDetailTab.id);
             continue;
           }
           
-          // Шаг 2: Ждём и проверяем URL
-          console.log('[VACANCY ' + (i+1) + '] Жду 5 секунд для проверки перезагрузки страницы...');
+          console.log('Жду 5 секунд для проверки перезагрузки страницы...');
           await new Promise(resolve => setTimeout(resolve, 5000));
           
-          // Проверяем, существует ли ещё вкладка
           let tabInfo;
           try {
             tabInfo = await chrome.tabs.get(vacancyDetailTab.id);
           } catch (error) {
-            console.log('[VACANCY ' + (i+1) + '] Вкладка уже закрыта: ' + error.message);
+            console.log('Вкладка уже закрыта: ' + error.message);
             continue;
           }
-          
-          console.log('[VACANCY ' + (i+1) + '] URL вкладки после нажатия: ' + tabInfo.url);
           
           if (tabInfo.url.includes('startedWithQuestion=false')) {
-            console.log('[VACANCY ' + (i+1) + '] вакансия содержит дополнительные вопросы');
+            console.log('вакансия содержит дополнительные вопросы');
             await chrome.tabs.remove(vacancyDetailTab.id);
-            console.log('[VACANCY ' + (i+1) + '] Закрыл вкладку с дополнительными вопросами');
+            console.log('Закрыл вкладку с дополнительными вопросами');
             continue;
           }
-          
-          // Шаг 3: Работаем с модальным окном
-          console.log('[VACANCY ' + (i+1) + '] Инжектирую скрипт для работы с модальным окном...');
           
           try {
             await chrome.scripting.executeScript({
@@ -460,30 +426,29 @@ async function startAutomation() {
               func: (params) => {
                 const { resumeName, coverLetter } = params;
                 
-                console.log('[MODAL] Работаю с модальным окном');
+console.log('=Это новая вакансия=. Начинаю выполнять МОР1');
                 
                 const allDialogs = document.querySelectorAll('[role="dialog"]');
-                console.log('[MODAL] Найдено диалогов: ' + allDialogs.length);
                 
                 if (allDialogs.length !== 1) {
-                  console.log('[MODAL] модальное окно не определено');
+                  console.log('модальное не найдено. Останов');
                   chrome.runtime.sendMessage({ action: 'closeTab', reason: 'модальное окно не определено' });
                   return;
                 }
                 
                 const modal = allDialogs[0];
-                console.log('[MODAL] открылось модальное');
+                console.log('открылось модальное');
                 
                 const resumeElements = modal.querySelectorAll('[data-qa="resume-title"]');
                 if (resumeElements.length !== 1) {
-                  console.log('[MODAL] в модальном окне больше одного элемента выбора резюме');
+                  console.log('в модальном окне больше одного элемента выбора вакансии. останов.');
                   chrome.runtime.sendMessage({ action: 'closeTab', reason: 'больше одного элемента выбора резюме' });
                   return;
                 }
                 
                 const respondButtonInModal = modal.querySelector('[data-qa="vacancy-response-submit-popup"]');
                 if (!respondButtonInModal) {
-                  console.log('[MODAL] условие на нахождение элемента =откликнуться= не выполнено');
+                  console.log('условие на нахождение элемента =откликнуться= в диалоговом окне не выполнено');
                   chrome.runtime.sendMessage({ action: 'closeTab', reason: 'кнопка откликнуться не найдена в модальном окне' });
                   return;
                 }
@@ -495,7 +460,7 @@ async function startAutomation() {
                 
                 if (addLetterBtn && !respondButtonInModal.disabled) {
                   modalType = 'simple1';
-                  console.log('[MODAL] тип модального окна: simple1');
+                  console.log('Тип модального окна: simple1');
                 } else if (existingTextArea && !addLetterBtn && respondButtonInModal.disabled) {
                   const textAreaValue = existingTextArea.value || '';
                   const textAreaPlaceholder = existingTextArea.placeholder || '';
@@ -507,12 +472,12 @@ async function startAutomation() {
                       textAreaPlaceholder.includes('Сопроводительное письмо') ||
                       labelText.includes('Сопроводительное письмо')) {
                     modalType = 'simple2';
-                    console.log('[MODAL] тип модального окна: simple2');
+                    console.log('Тип модального окна: simple2');
                   }
                 }
                 
                 if (!modalType) {
-                  console.log('[MODAL] =тип модального окна не определен=');
+                  console.log('=тип модального окна не определен=, останов');
                   chrome.runtime.sendMessage({ action: 'closeTab', reason: 'тип модального окна не определен' });
                   return;
                 }
@@ -526,13 +491,13 @@ async function startAutomation() {
                   });
                   
                   if (visibleInputs.length > 0) {
-                    console.log('[MODAL] вакансия содержит дополнительные вопросы');
+                    console.log('есть непонятные поля ввода');
                     chrome.runtime.sendMessage({ action: 'closeTab', reason: 'есть дополнительные вопросы' });
                     return;
                   }
                 }
                 
-                console.log('[MODAL] Ищу резюме: ' + resumeName);
+                console.log('Ищу резюме: ' + resumeName);
                 
                 const resumeCard = modal.querySelector('[data-qa="resume-title"]');
                 if (resumeCard) {
@@ -557,11 +522,14 @@ async function startAutomation() {
                         }
                       }
                       
-                      if (uniqueResumes.length === 0) {
-                        console.log('[MODAL] Список резюме не открылся');
+if (uniqueResumes.length === 0) {
+                        console.log('Список резюме не открылся');
                         chrome.runtime.sendMessage({ action: 'closeTab', reason: 'список резюме не открылся' });
                         return;
                       }
+                      
+                      console.log('Найдено резюме в списке: ' + uniqueResumes.length);
+                      console.log('Уникальных резюме: ' + uniqueResumes.length);
                       
                       let targetResume = null;
                       const searchName = resumeName.toLowerCase();
@@ -569,9 +537,11 @@ async function startAutomation() {
                       for (let i = 0; i < uniqueResumes.length; i++) {
                         const resume = uniqueResumes[i];
                         const title = resume.title.toLowerCase();
+                        console.log('Резюме ' + (i+1) + ': ' + resume.title);
                         
                         if (title.includes(searchName) || searchName.includes(title)) {
                           targetResume = resume.element;
+                          console.log('Нашёл подходящее резюме: ' + resume.title);
                         }
                       }
                       
@@ -579,22 +549,21 @@ async function startAutomation() {
                         const targetCard = targetResume.closest('[role="button"][tabindex="0"], button, [tabindex="0"]');
                         if (targetCard) {
                           targetCard.click();
-                          console.log('[MODAL] Кликнул на выбранное резюме');
+                          console.log('Выбрано резюме: ' + targetResume.querySelector('[data-qa="cell-text-content"]').textContent);
                         }
-                      } else {
-                        console.log('[MODAL] Не нашёл подходящее резюме');
                       }
-                    }, 1500);  // Увеличили с 1000 до 1500 для надежного открытия списка
+                    }, 1000);
                   }
                 }
                 
                 // Основной таймаут после выбора резюме (увеличен для надежности)
                 // Для simple1: 1500мс на выбор резюме + 2000мс на применение = 3500мс
                 // Для simple2: резюме уже выбрано, но нужно время на инициализацию
-                setTimeout(() => {
+setTimeout(() => {
                   if (modalType === 'simple2') {
                     const textArea = modal.querySelector('textarea[data-qa="vacancy-response-popup-form-letter-input"]');
                     if (textArea) {
+                      console.log('Нашёл поле для сопроводительного письма');
                       textArea.value = coverLetter;
                       textArea.dispatchEvent(new Event('input', { bubbles: true }));
                       textArea.dispatchEvent(new Event('change', { bubbles: true }));
@@ -602,34 +571,34 @@ async function startAutomation() {
                       textArea.focus();
                       setTimeout(() => {
                         textArea.blur();
-                        console.log('[MODAL] Вставил сопроводительное письмо');
+                        console.log('Вставил сопроводительное письмо');
                         
                         setTimeout(() => {
                           const submitButton = modal.querySelector('[data-qa="vacancy-response-submit-popup"]');
                           if (submitButton && !submitButton.disabled) {
                             submitButton.click();
-                            console.log('[MODAL] Отклик отправлен');
+                            console.log('Отправляю отклик');
                             chrome.runtime.sendMessage({ action: 'responseSent' });
                           } else {
-                            console.log('[MODAL] Кнопка отправки не найдена');
+                            console.log('Кнопка отправки не найдена или заблокирована');
                             chrome.runtime.sendMessage({ action: 'closeTab', reason: 'кнопка отправки не найдена' });
                           }
-                        }, 1000);  // Увеличили с 500 до 1000 для надежной отправки
-                      }, 300);  // Увеличили со 100 до 300 для надежного блюра
+                        }, 1000);
+                      }, 100);
                     } else {
-                      console.log('[MODAL] Поле для сопроводительного письма не найдено');
+                      console.log('Поле для сопроводительного письма не найдено после нажатия кнопки');
                       chrome.runtime.sendMessage({ action: 'closeTab', reason: 'поле не найдено' });
                     }
                     return;
                   }
                   
                   if (!addLetterBtn) {
-                    console.log('[MODAL] условие на нахождение элемента =добавить сопроводительное= не выполнено');
+                    console.log('Кнопка \'Добавить сопроводительное\' не найдена');
                     chrome.runtime.sendMessage({ action: 'closeTab', reason: 'кнопка добавить не найдена' });
                     return;
                   }
                   
-                  console.log('[MODAL] Нажимаю кнопку "Добавить сопроводительное"');
+                  console.log('Нажимаю кнопку \'Добавить сопроводительное\'');
                   addLetterBtn.click();
                   
                   setTimeout(() => {
@@ -640,6 +609,7 @@ async function startAutomation() {
                     }
                     
                     if (textArea) {
+                      console.log('Нашёл поле для сопроводительного письма');
                       textArea.value = coverLetter;
                       textArea.dispatchEvent(new Event('input', { bubbles: true }));
                       textArea.dispatchEvent(new Event('change', { bubbles: true }));
@@ -647,39 +617,39 @@ async function startAutomation() {
                       textArea.focus();
                       setTimeout(() => {
                         textArea.blur();
-                        console.log('[MODAL] Вставил сопроводительное письмо');
+                        console.log('Вставил сопроводительное письмо');
                         
                         setTimeout(() => {
                           const submitButton = modal.querySelector('[data-qa="vacancy-response-submit-popup"]');
                           if (submitButton && !submitButton.disabled) {
                             submitButton.click();
-                            console.log('[MODAL] Отклик отправлен');
+                            console.log('Отправляю отклик');
                             chrome.runtime.sendMessage({ action: 'responseSent' });
                           } else {
-                            console.log('[MODAL] Кнопка отправки не найдена');
+                            console.log('Кнопка отправки не найдена или заблокирована');
                             chrome.runtime.sendMessage({ action: 'closeTab', reason: 'кнопка отправки не найдена' });
                           }
-                        }, 1000);  // Увеличили с 500 до 1000 для надежной отправки
-                      }, 300);  // Увеличили со 100 до 300 для надежного блюра
+                        }, 1000);
+                      }, 100);
                     } else {
-                      console.log('[MODAL] Поле для сопроводительного письма не найдено');
+                      console.log('Поле для сопроводительного письма не найдено после нажатия кнопки');
                       chrome.runtime.sendMessage({ action: 'closeTab', reason: 'поле не найдено' });
                     }
-                  }, 2000);  // Увеличили с 1500 до 2000 для надежного появления textarea
-                }, 3500);  // Увеличили с 2000 до 3500: 1500мс на выбор резюме + 2000мс на применение
+                  }, 1500);
+                }, 2000);
               },
               args: [{ resumeName: selectedResume, coverLetter: CONFIG.coverLetter }]
             });
-          } catch (error) {
-            console.log('[VACANCY ' + (i+1) + '] Ошибка при инжектировании скрипта модального окна: ' + error.message);
+} catch (error) {
+            console.log('Ошибка при инжектировании скрипта модального окна: ' + error.message);
             await chrome.tabs.remove(vacancyDetailTab.id);
           }
         } catch (error) {
-          console.log('[VACANCY ' + (i+1) + '] Ошибка при обработке вакансии: ' + error.message);
+          console.log('Ошибка при обработке вакансии: ' + error.message);
           try {
             await chrome.tabs.remove(vacancyDetailTab.id);
           } catch (e) {
-            console.log('[VACANCY ' + (i+1) + '] Не удалось закрыть вкладку: ' + e.message);
+            console.log('Не удалось закрыть вкладку: ' + e.message);
           }
         }
       }
@@ -699,5 +669,6 @@ async function startAutomation() {
 
 // При клике на иконку - запускаем автоматизацию
 chrome.action.onClicked.addListener(async (tab) => {
+  console.log('=НАЧАЛО=. был клик по иконке');
   await startAutomation();
 });
