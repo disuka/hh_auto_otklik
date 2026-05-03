@@ -3,8 +3,7 @@
 const CONFIG = {
   logUrl: 'http://localhost:8000/api/v1/logs',
   logApiKey: 'secret-key-for-hh-browser',
-  logProject: 'my-bot',
-  logTimeout: 5000
+  logProject: 'my-bot'
 };
 
 let SESSION_ID = null;
@@ -20,9 +19,6 @@ function generateSessionId() {
 
 async function sendLog(level, message, metadata = {}) {
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), CONFIG.logTimeout);
-
     await fetch(CONFIG.logUrl, {
       method: 'POST',
       headers: {
@@ -38,11 +34,8 @@ async function sendLog(level, message, metadata = {}) {
           sessionId: SESSION_ID,
           ...metadata
         }
-      }),
-      signal: controller.signal
+      })
     });
-
-    clearTimeout(timeoutId);
   } catch (error) {
     console.error('[LOGGER] ' + error.message);
   }
