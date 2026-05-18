@@ -3,12 +3,19 @@
   "name": "HH Auto Response",
   "version": "2.0",
   "description": "Auto responses on hh.ru",
-  "permissions": ["activeTab", "scripting", "tabs"],
+  "permissions": ["activeTab", "scripting", "tabs", "storage"],
   "host_permissions": ["*://*.hh.ru/*", "http://localhost:8000/*"],
   "action": {
     "default_title": "Run HH Auto"
   },
   "background": {
     "service_worker": "background.js"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.hh.ru/*"],
+      "js": ["main.js"],
+      "run_at": "document_idle"
+    }
+  ]
 }
