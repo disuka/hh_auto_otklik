@@ -1,7 +1,5 @@
-// main.js (исправлен блок process_multiple_vacancies)
+// main.js
 (async () => {
-  console.log('main.js started, hhState:', (await chrome.storage.local.get('hhState')).hhState);
-
   const localState = await chrome.storage.local.get(['hhState', 'errorMessage']);
   let hhState = localState.hhState;
 
@@ -301,12 +299,8 @@
     return btn;
   }
 
-  async function checkQuestionInUrl() {
-    return window.location.href.includes('startedWithQuestion');
-  }
-
   async function detectModalType() {
-    await sendLog('debug', 'дусл9 зашел', { dom: document.documentElement.outerHTML });
+    await sendLog('debug', 'дусл9 зашел', {});
     const modals = document.querySelectorAll('[aria-modal="true"][role="dialog"]');
     if (modals.length !== 1) {
       await sendLog('error', 'дусл9 модальное-ошибка', { count: modals.length });
@@ -387,7 +381,7 @@
       return;
     }
     const currentResumeText = resumeElement.textContent.trim();
-    await sendLog('info', 'по умолчанию резюме выбрано', { defaultResume: currentResumeText });
+    await sendLog('info', 'д17 по умолчанию резюме выбрано', { defaultResume: currentResumeText });
     resumeElement.click();
     let dropdownItems = null;
     for (let i = 0; i < 50; i++) {
@@ -438,6 +432,8 @@
         vacancyLower.includes('аналитиков') ||
         vacancyLower.includes('аналитическ')) {
       selectedResume = 'Руководитель аналитического отдела';
+    } else if (vacancyLower.includes('руководитель отдела')) {
+      selectedResume = 'Руководитель отдела ИТ';
     } else if (vacancyLower.includes('аналитик')) {
       selectedResume = 'Аналитик';
     } else if (vacancyLower.includes('проект') ||
@@ -448,7 +444,7 @@
     } else {
       selectedResume = 'Руководитель направления';
     }
-    await sendLog('info', 'выбрал резюме', { vacancy: vacancyTitle, selected: selectedResume });
+    await sendLog('info', 'д17 выбрал резюме', { vacancy: vacancyTitle, selected: selectedResume });
     let targetItem = null;
     for (const item of dropdownItems) {
       const titleDiv = item.querySelector('[data-qa="cell-text-content"]');
@@ -467,7 +463,7 @@
     await sendLog('info', 'д17 закончил выбор резюме', {});
   }
 
-  async function sendResponse() {
+  async function sendResponse(type) {
     const modal = document.querySelector('[aria-modal="true"][role="dialog"]');
     if (!modal) {
       await sendLog('error', 'sendResponse: модальное окно не найдено', {});
@@ -479,7 +475,7 @@
       return;
     }
     submitBtn.click();
-    await sendLog('info', 'д18 отправил отклик', { url: window.location.href });
+    await sendLog('info', `д18 отправил отклик ${type}`, { url: window.location.href });
     await new Promise(r => setTimeout(r, 4000));
   }
 
@@ -515,10 +511,12 @@
     if (hhState === 'collect_resumes') {
       await collectResumes();
       if (settings.test_vacancy && settings.test_vacancy.trim() !== '') {
-        await sendLog('debug', 'д20 обнаружен дебаг', { url: settings.test_vacancy });
-        await openInNewTab(settings.test_vacancy);
-        await sendLog('debug', 'д20 открыл вакансию из переменной тест_вакансия', { url: settings.test_vacancy });
-        await chrome.storage.local.set({ hhState: 'finished' });
+        await sendLog('debug', 'д140 обнаружен дебаг', { url: settings.test_vacancy });
+        await chrome.storage.local.set({
+          hhState: 'process_test_vacancy',
+          hhStateTimestamp: Date.now()
+        });
+        window.location.href = settings.test_vacancy;
         return;
       }
       await chrome.storage.local.set({ hhState: 'navigate_to_search', hhStateTimestamp: Date.now() });
@@ -586,7 +584,7 @@
         if (uniqueVacancies.length > 0 && settings.maxVacanciesToProcess > 0) {
           const first = uniqueVacancies[0];
           await randomDelay();
-          await sendLog('info', `д11 открытие вакансии для детального сбора (1)`, { url: first.url, title: first.title });
+          await sendLog('info', `д11 открытие вакансии для детального сбора`, { url: first.url, title: first.title });
           const currentTabId = await getCurrentTabId();
           if (currentTabId) await saveSearchTabId(currentTabId);
           const response = await openInNewTab(first.url);
@@ -609,6 +607,24 @@
       return;
     }
 
+    if (hhState === 'process_test_vacancy') {
+      if (!window.location.href.includes('/vacancy/')) return;
+      await waitForElement('[data-qa="vacancy-title"]', 15000);
+      await randomDelay();
+      const detailedInfo = await collectDetailedInfo();
+      const testVacancy = {
+        porNum: 1,
+        url: window.location.href,
+        title: detailedInfo.title_detail || '',
+        company: detailedInfo.company_detail || '',
+        ...detailedInfo
+      };
+      const enrichedVacancies = [testVacancy];
+      await chrome.storage.local.set({ enrichedVacancies, hhState: 'process_rank_and_respond', searchUrl: window.location.href });
+      await processRankAndRespond();
+      return;
+    }
+
     if (hhState === 'processing_vacancies') {
       const { vacanciesToProcess, currentVacancyIndex, maxVacanciesToProcess, searchUrl, processStartTime, enrichedVacancies } = await chrome.storage.local.get([
         'vacanciesToProcess', 'currentVacancyIndex', 'maxVacanciesToProcess', 'searchUrl', 'processStartTime', 'enrichedVacancies'
@@ -617,56 +633,7 @@
       if (!vacanciesToProcess || currentVacancyIndex >= vacanciesToProcess.length || currentVacancyIndex >= maxVacanciesToProcess) {
         const finalEnriched = enrichedVacancies || [];
         await sendLog('info', `д12 обогащенных ${finalEnriched.length} вакансий`, { обогащенные_вакансии: finalEnriched });
-
-        let rankedVacancies = [];
-        let rankingError = false;
-        if (settings.rank_deepseek === 1) {
-          try {
-            rankedVacancies = await new Promise((resolve, reject) => {
-              chrome.runtime.sendMessage({
-                type: 'RANK_VACANCIES',
-                vacancies: finalEnriched,
-                resume: settings.resume_text || '',
-                coverLetter: settings.coverLetter || '',
-                extraData: settings.extra_data || ''
-              }, (response) => {
-                if (response && response.success) resolve(response.ranked);
-                else reject(new Error(response?.error || 'Ranking failed'));
-              });
-            });
-            await sendLog('info', 'д13 общая инфо с ранжем от дипсик', {
-              обогащенные_вакансии_с_рангом: rankedVacancies
-            });
-          } catch (err) {
-            await sendLog('error', `Ошибка ранжирования: ${err.message}`);
-            rankingError = true;
-          }
-        }
-
-        if (settings.rank_deepseek === 1 && rankingError) {
-          await chrome.storage.local.set({ hhState: 'error', errorMessage: 'DeepSeek ranking failed', hhStateTimestamp: Date.now() });
-          return;
-        }
-
-        let vacanciesToSort = rankedVacancies.length ? rankedVacancies : finalEnriched;
-        vacanciesToSort.sort((a, b) => {
-          const ratingA = a.deepseek_rating ?? -1;
-          const ratingB = b.deepseek_rating ?? -1;
-          if (ratingA !== ratingB) return ratingB - ratingA;
-          return (a.porNum ?? Infinity) - (b.porNum ?? Infinity);
-        });
-        await sendLog('info', 'д131 отсортированные вакансии', { sorted: vacanciesToSort.map(v => ({ porNum: v.porNum, deepseek_rating: v.deepseek_rating, title: v.title })) });
-
-        const limit = Math.min(vacanciesToSort.length, settings.maxVacanciesToProcess);
-        const multipleList = vacanciesToSort.slice(0, limit);
-        await chrome.storage.local.set({
-          multipleVacanciesList: multipleList,
-          currentMultipleIndex: 0,
-          hhState: 'process_multiple_vacancies'
-        });
-        const firstVacancy = multipleList[0];
-        await sendLog('info', `д14 открыл вакансию с рейтингом ${firstVacancy.deepseek_rating ?? 'нет'}`, { url: firstVacancy.url, rating: firstVacancy.deepseek_rating });
-        await openInNewTab(firstVacancy.url);
+        await processRankAndRespond(finalEnriched);
         return;
       }
 
@@ -701,18 +668,76 @@
       return;
     }
 
-    // ==================== ИСПРАВЛЕННЫЙ БЛОК ОБРАБОТКИ НЕСКОЛЬКИХ ВАКАНСИЙ ====================
+    async function processRankAndRespond(enrichedList = null) {
+      let finalEnriched = enrichedList;
+      if (!finalEnriched) {
+        const stored = await chrome.storage.local.get('enrichedVacancies');
+        finalEnriched = stored.enrichedVacancies || [];
+      }
+      if (!finalEnriched.length) {
+        await sendLog('error', 'Нет обогащённых вакансий для обработки');
+        return;
+      }
+
+      let rankedVacancies = [];
+      let rankingError = false;
+      if (settings.rank_deepseek === 1) {
+        try {
+          rankedVacancies = await new Promise((resolve, reject) => {
+            chrome.runtime.sendMessage({
+              type: 'RANK_VACANCIES',
+              vacancies: finalEnriched,
+              resume: settings.resume_text || '',
+              coverLetter: settings.coverLetter || '',
+              extraData: settings.extra_data || ''
+            }, (response) => {
+              if (response && response.success) resolve(response.ranked);
+              else reject(new Error(response?.error || 'Ranking failed'));
+            });
+          });
+          await sendLog('info', 'д13 общая инфо с ранжем от дипсик', {
+            обогащенные_вакансии_с_рангом: rankedVacancies
+          });
+        } catch (err) {
+          await sendLog('error', `Ошибка ранжирования: ${err.message}`);
+          rankingError = true;
+        }
+      }
+
+      if (settings.rank_deepseek === 1 && rankingError) {
+        await chrome.storage.local.set({ hhState: 'error', errorMessage: 'DeepSeek ranking failed', hhStateTimestamp: Date.now() });
+        return;
+      }
+
+      let vacanciesToSort = rankedVacancies.length ? rankedVacancies : finalEnriched;
+      vacanciesToSort.sort((a, b) => {
+        const ratingA = a.deepseek_rating ?? -1;
+        const ratingB = b.deepseek_rating ?? -1;
+        if (ratingA !== ratingB) return ratingB - ratingA;
+        return (a.porNum ?? Infinity) - (b.porNum ?? Infinity);
+      });
+      await sendLog('info', 'д131 отсортированные вакансии', { sorted: vacanciesToSort.map(v => ({ porNum: v.porNum, deepseek_rating: v.deepseek_rating, title: v.title })) });
+
+      const limit = Math.min(vacanciesToSort.length, settings.maxVacanciesToProcess);
+      const multipleList = vacanciesToSort.slice(0, limit);
+
+      await chrome.storage.local.set({
+        multipleVacanciesList: multipleList,
+        currentMultipleIndex: 0,
+        hhState: 'process_multiple_vacancies',
+        searchUrl: window.location.href
+      });
+
+      const firstVacancy = multipleList[0];
+      await sendLog('info', `д14 открыл вакансию с рейтингом ${firstVacancy.deepseek_rating ?? 'нет'}`, { url: firstVacancy.url, rating: firstVacancy.deepseek_rating });
+      window.location.reload();
+    }
+
+    // ==================== БЛОК ОБРАБОТКИ НЕСКОЛЬКИХ ВАКАНСИЙ ====================
     if (hhState === 'process_multiple_vacancies') {
       const { multipleVacanciesList, currentMultipleIndex, searchTabId, searchUrl } = await chrome.storage.local.get([
         'multipleVacanciesList', 'currentMultipleIndex', 'searchTabId', 'searchUrl'
       ]);
-
-      await sendLog('debug', 'process_multiple_vacancies state', {
-        listLength: multipleVacanciesList?.length,
-        currentIndex: currentMultipleIndex,
-        searchTabId: searchTabId,
-        currentUrl: window.location.href
-      });
 
       if (!multipleVacanciesList || currentMultipleIndex >= multipleVacanciesList.length) {
         const { processStartTime } = await chrome.storage.local.get(['processStartTime']);
@@ -730,9 +755,10 @@
       const currentVacancy = multipleVacanciesList[currentMultipleIndex];
       const currentUrl = window.location.href;
 
-      // Если мы на странице ответа (vacancy_response), считаем отклик успешным и переходим к следующей вакансии
       if (currentUrl.includes('/applicant/vacancy_response')) {
-        await sendLog('info', 'Обнаружена страница ответа, отклик уже отправлен', { url: currentUrl });
+        if (currentUrl.includes('startedWithQuestion')) {
+          await sendLog('info', 'д15 доп вопросы', { url: window.location.href });
+        }
         const newIndex = currentMultipleIndex + 1;
         await chrome.storage.local.set({ currentMultipleIndex: newIndex });
         const currentTabId = await getCurrentTabId();
@@ -749,23 +775,19 @@
         return;
       }
 
-      // Если мы не на странице этой вакансии – открываем её
       if (!currentUrl.includes(currentVacancy.url)) {
         if (currentMultipleIndex > 0) {
-          await sendLog('info', `д25 открываю очередную вакансию`, {
-            vacancy: { url: currentVacancy.url, title: currentVacancy.title, index: currentMultipleIndex }
-          });
+          await sendLog('debug', 'д25 открываю очередную вакансию', { vacancy: currentVacancy });
           await openInNewTab(currentVacancy.url);
         } else {
           if (!currentUrl.includes('/vacancy/')) {
-            await sendLog('info', `д14 открыл вакансию (повторно)`, { url: currentVacancy.url, index: currentMultipleIndex });
+            await sendLog('info', `д14 открыл вакансию с рейтингом ${currentVacancy.deepseek_rating ?? 'нет'}`, { url: currentVacancy.url, rating: currentVacancy.deepseek_rating });
             await openInNewTab(currentVacancy.url);
           }
         }
         return;
       }
 
-      // Находимся на странице вакансии – выполняем отклик
       await waitForElement('[data-qa="vacancy-response-link-top"]', 10000);
       const responseButton = await findResponseButton();
       const buttonText = responseButton.innerText.trim().toLowerCase();
@@ -775,41 +797,85 @@
         await sendLog('info', 'д30 буду откликаться, новая', { url: window.location.href });
         responseButton.click();
 
-        // Сначала проверяем, есть ли в URL параметр startedWithQuestion (Д15)
-        const hasQuestions = await checkQuestionInUrl();
-        if (hasQuestions) {
-          await sendLog('info', 'д15 доп вопросы', { url: window.location.href });
-          // Увеличиваем индекс и закрываем вкладку, так как страница с вопросами требует ручного вмешательства
-          const newIndex = currentMultipleIndex + 1;
-          await chrome.storage.local.set({ currentMultipleIndex: newIndex });
-          const currentTabId = await getCurrentTabId();
-          if (currentTabId) await closeVacancyTab(currentTabId);
-          if (searchTabId) {
-            chrome.tabs.update(searchTabId, { active: true }, () => {
-              chrome.tabs.reload(searchTabId);
-            });
-          } else if (searchUrl) {
-            await openInNewTab(searchUrl);
-          } else {
-            window.location.reload();
-          }
-          return;
-        }
+        // Ожидание появления модального окна или изменения URL (до waitForResponseSec секунд)
+        let startTime = Date.now();
+        let modal = null;
+        let urlChanged = false;
+        const originalUrl = window.location.href;
 
-        // Если вопросов нет, ждём появления модального окна (до 3 секунд)
-        let modalAppeared = false;
-        for (let i = 0; i < 30; i++) {
+        while ((Date.now() - startTime) < settings.waitForResponseSec * 1000) {
           await new Promise(r => setTimeout(r, 100));
-          const modal = document.querySelector('[aria-modal="true"][role="dialog"]');
-          if (modal) {
-            modalAppeared = true;
+          if (window.location.href !== originalUrl) {
+            urlChanged = true;
             break;
           }
+          modal = document.querySelector('[aria-modal="true"][role="dialog"]');
+          if (modal) break;
         }
 
-        if (!modalAppeared) {
-          // Модальное окно не появилось – считаем, что отклик отправлен (быстрый отклик)
-          await sendLog('info', 'д30 отклик отправлен без модального окна (быстрый отклик)', { url: window.location.href });
+        if (urlChanged) {
+          // Произошёл переход – новая страница будет обработана при следующем запуске
+          return;
+        }
+
+        if (modal) {
+          // Модальное окно найдено – обрабатываем
+          await sendLog('info', 'д16 модальное окно, буду определять разновидность', { url: window.location.href });
+          await new Promise(resolve => setTimeout(resolve, settings.modalWaitSec * 1000));
+          const modalType = await detectModalType();
+
+          let typeForLog = '';
+          if (modalType === 'simple1') {
+            typeForLog = 'симпл1';
+            await sendLog('info', 'д161 модальное окно вида симпл1', { url: window.location.href });
+            await insertCoverLetter(settings.coverLetter);
+          } else {
+            typeForLog = 'симпл2';
+            await sendLog('info', 'д162 модальное окно вида симпл2(предполагаю)', { url: window.location.href });
+            const modalWindow = document.querySelector('[aria-modal="true"][role="dialog"]');
+            if (modalWindow) {
+              const letterInput = modalWindow.querySelector('[data-qa="vacancy-response-popup-form-letter-input"]');
+              const resumeSelect = modalWindow.querySelector('[data-qa="resume-title"]');
+              const submitBtn = modalWindow.querySelector('[data-qa="vacancy-response-submit-popup"]');
+              const elementsFound = {
+                letterInput: !!letterInput,
+                resumeSelect: !!resumeSelect,
+                submitBtn: !!submitBtn
+              };
+              const foundCount = Object.values(elementsFound).filter(v => v === true).length;
+              await sendLog('debug', `д162 нашел ${foundCount} элементов`, elementsFound);
+              if (letterInput) {
+                if (letterInput.tagName === 'TEXTAREA' || letterInput.tagName === 'INPUT') {
+                  letterInput.value = settings.coverLetter;
+                  letterInput.dispatchEvent(new Event('input', { bubbles: true }));
+                } else if (letterInput.isContentEditable) {
+                  letterInput.innerText = settings.coverLetter;
+                  letterInput.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+                await sendLog('debug', 'д162 вставил текст сопроводительного письма', {});
+              }
+              if (submitBtn && submitBtn.hasAttribute('disabled')) {
+                await sendLog('error', 'д165 не разобрался с кнопкой', { url: window.location.href });
+                await chrome.storage.local.remove(['hhState', 'sessionId', 'hhStateTimestamp', 'processStartTime', 'multipleVacanciesList', 'currentMultipleIndex']);
+                const { processStartTime } = await chrome.storage.local.get(['processStartTime']);
+                const endTime = Date.now();
+                const durationMs = endTime - processStartTime;
+                const durationSec = Math.floor(durationMs / 1000);
+                const minutes = Math.floor(durationSec / 60);
+                const seconds = durationSec % 60;
+                const durationFormatted = minutes > 0 ? `${minutes} мин ${seconds} сек` : `${seconds} сек`;
+                await sendLog('info', 'д999 штатный конец работы', { итоговое_время: durationFormatted, длительность_мс: durationMs });
+                return;
+              }
+              if (submitBtn && submitBtn.hasAttribute('disabled')) {
+                submitBtn.removeAttribute('disabled');
+              }
+            }
+          }
+
+          await processResumeSelection();
+          await sendResponse(typeForLog);
+
           const newIndex = currentMultipleIndex + 1;
           await chrome.storage.local.set({ currentMultipleIndex: newIndex });
           const currentTabId = await getCurrentTabId();
@@ -826,32 +892,17 @@
           return;
         }
 
-        // Модальное окно появилось – выполняем полную обработку
-        await sendLog('info', 'д16 модальное окно, буду определять разновидность', { url: window.location.href });
-        await new Promise(resolve => setTimeout(resolve, settings.modalWaitSec * 1000));
-        const modalType = await detectModalType();
-        if (modalType === 'simple1') {
-          await sendLog('info', 'д161 модальное окно вида симпл1', { url: window.location.href });
-          await insertCoverLetter(settings.coverLetter);
-        } else {
-          await sendLog('info', 'д162 модальное окно вида симпл2', { url: window.location.href });
-        }
-        await processResumeSelection();
-        await sendResponse();
-
-        const newIndex = currentMultipleIndex + 1;
-        await chrome.storage.local.set({ currentMultipleIndex: newIndex });
-        const currentTabId = await getCurrentTabId();
-        if (currentTabId) await closeVacancyTab(currentTabId);
-        if (searchTabId) {
-          chrome.tabs.update(searchTabId, { active: true }, () => {
-            chrome.tabs.reload(searchTabId);
-          });
-        } else if (searchUrl) {
-          await openInNewTab(searchUrl);
-        } else {
-          window.location.reload();
-        }
+        // Ни модального окна, ни перехода – нештатная ситуация
+        await sendLog('debug', 'дусл3 неформат', { url: window.location.href });
+        await chrome.storage.local.remove(['hhState', 'sessionId', 'hhStateTimestamp', 'processStartTime', 'multipleVacanciesList', 'currentMultipleIndex']);
+        const { processStartTime } = await chrome.storage.local.get(['processStartTime']);
+        const endTime = Date.now();
+        const durationMs = endTime - processStartTime;
+        const durationSec = Math.floor(durationMs / 1000);
+        const minutes = Math.floor(durationSec / 60);
+        const seconds = durationSec % 60;
+        const durationFormatted = minutes > 0 ? `${minutes} мин ${seconds} сек` : `${seconds} сек`;
+        await sendLog('info', 'д999 штатный конец работы', { итоговое_время: durationFormatted, длительность_мс: durationMs });
         return;
       } else {
         await sendLog('error', 'д30 на кнопке неизвестная надпись, останов', { url: window.location.href });
@@ -887,7 +938,7 @@
     const minutes = Math.floor(durationSec / 60);
     const seconds = durationSec % 60;
     const durationFormatted = minutes > 0 ? `${minutes} мин ${seconds} сек` : `${seconds} сек`;
-    await sendLog('info', 'д999 штатный конец работы (ошибка)', { итоговое_время: durationFormatted, длительность_мс: durationMs });
+    await sendLog('info', 'д999 штатный конец работы', { итоговое_время: durationFormatted, длительность_мс: durationMs });
     await chrome.storage.local.set({ hhState: 'error', errorMessage: err.message, hhStateTimestamp: Date.now() });
   }
 })();

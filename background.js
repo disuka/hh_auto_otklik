@@ -1,15 +1,16 @@
 // background.js
 const DEFAULT_SETTINGS = {
-  minDelaySec: 1,
-  maxDelaySec: 5,
-  maxPages: 2,
-  maxVacanciesToProcess: 20,
+  minDelaySec: 3,
+  maxDelaySec: 9,
+  maxPages: 1,
+  maxVacanciesToProcess: 23,
   rank_deepseek: 1,
   deepseek_timeout: 60,
   deepseek_refresh: 3,
-  deepseek_api_key: 'sk-a24c0f7066c349aa918d1a2ef44347bf',
+  deepseek_api_key: 'sk-3e8b386acb878b7ab87b87bbac482379',
   test_vacancy: '',
   modalWaitSec: 2,
+  waitForResponseSec: 10,
   logUrl: 'http://localhost:8000/api/v1/logs',
   healthUrl: 'http://localhost:8000/health',
   apiKey: 'secret-key-for-hh-browser',
@@ -295,16 +296,6 @@ let currentSessionId = null;
 let currentSettings = null;
 const rankingCache = new Map();
 
-async function restoreSessionId() {
-  if (!currentSessionId) {
-    const stored = await chrome.storage.local.get('sessionId');
-    if (stored.sessionId) {
-      currentSessionId = stored.sessionId;
-    }
-  }
-}
-restoreSessionId();
-
 function generateSessionId() {
   const now = new Date();
   const hours = now.getHours().toString().padStart(2, '0');
@@ -315,10 +306,8 @@ function generateSessionId() {
 
 async function sendLog(level, message, metadata = {}) {
   if (!currentSessionId) {
-    const stored = await chrome.storage.local.get('sessionId');
-    if (stored.sessionId) {
-      currentSessionId = stored.sessionId;
-    }
+    currentSessionId = generateSessionId();
+    await chrome.storage.local.set({ sessionId: currentSessionId });
   }
   const settings = currentSettings || DEFAULT_SETTINGS;
   const logData = {
@@ -388,23 +377,16 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 });
 
 chrome.action.onClicked.addListener(async (tab) => {
-  const state = await chrome.storage.local.get(['hhState']);
-  if (state.hhState && state.hhState !== 'finished' && state.hhState !== 'error') {
-    await sendLog('warn', 'Расширение уже работает. Для остановки используйте правый клик по иконке → Остановить HH Auto', {});
-    return;
-  }
+  await stopExtension(tab.id);
+  currentSessionId = generateSessionId();
+  await chrome.storage.local.set({ sessionId: currentSessionId });
   const healthy = await isLogServerHealthy();
   if (!healthy) {
     console.error('Сервер логирования недоступен, работа остановлена');
     return;
   }
-  if (!currentSessionId) {
-    currentSessionId = generateSessionId();
-    await chrome.storage.local.set({ sessionId: currentSessionId });
-  }
   let settings = await migrateSettings();
   currentSettings = settings;
-
   await sendLog('info', 'д1 начало', { settings });
   await chrome.storage.local.set({
     hhState: 'check_login',
@@ -445,28 +427,33 @@ function prepareVacanciesForRanking(vacancies) {
 async function callDeepSeekWithRetry(prompt, apiKey, timeoutSec, retries) {
   let lastError = null;
   let tokensUsed = null;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutSec * 1000);
-
-  const requestBody = {
-    model: 'deepseek-chat',
-    messages: [{ role: 'user', content: prompt }],
-    temperature: 0.3,
-    response_format: { type: 'json_object' }
-  };
-  const bodyString = JSON.stringify(requestBody);
-
-  await sendLog('info', 'д13. буду отправлять в дипсик', {
-    url: 'https://api.deepseek.com/v1/chat/completions',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`
-    },
-    body: requestBody
-  });
 
   for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutSec * 1000);
+
+    const requestBody = {
+      model: 'deepseek-v4-flash',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.3,
+      response_format: { type: 'json_object' }
+    };
+    const bodyString = JSON.stringify(requestBody);
+    const requestSizeKB = (bodyString.length / 1024).toFixed(2);
+    const startTime = Date.now();
+
+    await sendLog('info', 'д13. буду отправлять в дипсик', {
+      url: 'https://api.deepseek.com/v1/chat/completions',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: requestBody,
+      attempt: attempt + 1,
+      request_size_kb: requestSizeKB
+    });
+
     try {
       const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
         method: 'POST',
@@ -478,22 +465,29 @@ async function callDeepSeekWithRetry(prompt, apiKey, timeoutSec, retries) {
         signal: controller.signal
       });
       clearTimeout(timeoutId);
+      const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+
       if (!response.ok) throw new Error(`DeepSeek API error: ${response.status}`);
       const data = await response.json();
       tokensUsed = data.usage;
-      
-      await sendLog('debug', 'д13 ответ от дипсик (сырой)', data);
-      
+
+      await sendLog('debug', 'д13 ответ от дипсик (сырой)', {
+        ...data,
+        elapsed_seconds: elapsedSec
+      });
+
       const content = data.choices[0].message.content;
       const parsed = extractJsonFromText(content);
       if (parsed) return { result: parsed, tokens: tokensUsed };
+
       if (attempt < retries) {
         await sendLog('warn', `DeepSeek вернул невалидный JSON, повторная попытка ${attempt+1}`, { content });
-        requestBody.messages[0].content = prompt + "\n\nВАЖНО: Верни ТОЛЬКО валидный JSON. Никаких пояснений, только JSON. Начинай с { и заканчивай }.";
+        prompt = prompt + "\n\nВАЖНО: Верни ТОЛЬКО валидный JSON. Никаких пояснений, только JSON. Начинай с { и заканчивай }.";
         continue;
       }
       throw new Error(`Не удалось извлечь JSON из ответа DeepSeek: ${content}`);
     } catch (err) {
+      clearTimeout(timeoutId);
       lastError = err;
       if (attempt < retries) {
         await sendLog('warn', `Ошибка вызова DeepSeek, попытка ${attempt+1}: ${err.message}`);
@@ -501,7 +495,7 @@ async function callDeepSeekWithRetry(prompt, apiKey, timeoutSec, retries) {
       }
     }
   }
-  clearTimeout(timeoutId);
+
   await sendLog('error', 'д13 дипсик не отвечает', { error: lastError?.message });
   throw lastError;
 }
