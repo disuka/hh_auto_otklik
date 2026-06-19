@@ -479,6 +479,172 @@
     await new Promise(r => setTimeout(r, 4000));
   }
 
+  // ---------- Функция обработки страницы с вопросами (локальная LLM) ----------
+  async function processQuestionsPage(searchTabId, searchUrl) {
+    await sendLog('info', 'д15 доп вопросы – начинаем обработку через LLM', { url: window.location.href });
+
+    function getQuestionFromParent(el) {
+      let parent = el.parentElement;
+      for (let i = 0; i < 8 && parent && parent !== document.body; i++) {
+        let text = parent.innerText ? parent.innerText.replace(/\s+/g, ' ').trim() : '';
+        if (text.length > 30) {
+          if (/^(Да|Нет|Свой вариант|Выбрать|Вариант|Устраивает|Полностью|Частично|Нет,|Да,)/i.test(text)) {
+            parent = parent.parentElement;
+            continue;
+          }
+          let words = text.split(/\s+/);
+          if (words.length <= 4 && words.every(w => /^(да|нет|свой|вариант|устраивает|полностью|частично)$/i.test(w))) {
+            parent = parent.parentElement;
+            continue;
+          }
+          let clean = text.replace(/\s*(Да|Нет|Свой вариант|Выбрать|Укажите|Отметьте|Вариант|Полностью|Частично)\s*$/i, '').trim();
+          if (clean.length > 10) return clean;
+        }
+        parent = parent.parentElement;
+      }
+      return '';
+    }
+
+    const fields = [];
+    // Текстовые поля
+    const textInputs = document.querySelectorAll('input[type="text"], input:not([type]), textarea');
+    textInputs.forEach(el => {
+      let question = getQuestionFromParent(el);
+      if (!question && el.placeholder) question = el.placeholder;
+      if (!question && el.getAttribute('aria-label')) question = el.getAttribute('aria-label');
+      if (!question) question = 'Вопрос не определён';
+      let selector = el.id ? `#${el.id}` : (el.name ? `${el.tagName.toLowerCase()}[name="${el.name}"]` : el.tagName.toLowerCase());
+      fields.push({
+        type: el.tagName === 'TEXTAREA' ? 'textarea' : 'text',
+        question: question,
+        selector: selector,
+        required: el.required || false,
+        currentValue: el.value || ''
+      });
+    });
+
+    // Радио-группы
+    const radioGroups = new Map();
+    document.querySelectorAll('input[type="radio"]').forEach(radio => {
+      if (!radioGroups.has(radio.name)) radioGroups.set(radio.name, []);
+      radioGroups.get(radio.name).push(radio);
+    });
+    for (let [name, radios] of radioGroups.entries()) {
+      let question = getQuestionFromParent(radios[0]);
+      if (!question) question = 'Вопрос не определён';
+      const options = radios.map(radio => ({
+        value: radio.value,
+        label: radio.parentElement.innerText.trim() || radio.value
+      }));
+      fields.push({
+        type: 'radio',
+        question: question,
+        name: name,
+        options: options,
+        selector: `input[name="${name}"]`
+      });
+    }
+
+    // Чекбоксы
+    document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      let question = getQuestionFromParent(cb);
+      if (!question) question = 'Вопрос не определён';
+      let selector = cb.id ? `#${cb.id}` : (cb.name ? `input[name="${cb.name}"][value="${cb.value}"]` : cb.tagName.toLowerCase());
+      fields.push({
+        type: 'checkbox',
+        question: question,
+        selector: selector,
+        label: cb.parentElement.innerText.trim() || cb.value,
+        checked: cb.checked,
+        required: cb.required || false
+      });
+    });
+
+    // Выпадающие списки
+    document.querySelectorAll('select').forEach(sel => {
+      let question = getQuestionFromParent(sel);
+      if (!question) question = 'Вопрос не определён';
+      const options = Array.from(sel.options).map(opt => ({ value: opt.value, text: opt.text }));
+      let selector = sel.id ? `#${sel.id}` : (sel.name ? `select[name="${sel.name}"]` : 'select');
+      fields.push({
+        type: 'select',
+        question: question,
+        selector: selector,
+        options: options,
+        currentValue: sel.value,
+        required: sel.required || false
+      });
+    });
+
+    if (fields.length === 0) {
+      await sendLog('warn', 'Не найдено полей для заполнения, пропускаем вакансию');
+      return false;
+    }
+
+    // Отправляем запрос к LLM через background (обход CORS)
+    const response = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({
+        type: 'CALL_LLM',
+        fields: fields,
+        resume_text: settings.resume_text,
+        endpoint: settings.localLLMEndpoint
+      }, resolve);
+    });
+
+    if (!response.success) {
+      await sendLog('error', `Ошибка при вызове локальной LLM: ${response.error}`);
+      return false;
+    }
+
+    const llmResponse = response.answers;
+
+    // Заполняем поля
+    for (const ans of llmResponse) {
+      const field = fields.find(f => f.question === ans.question);
+      if (!field) continue;
+      if (field.type === 'text' || field.type === 'textarea') {
+        const el = document.querySelector(field.selector);
+        if (el) {
+          el.value = ans.answer;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      } else if (field.type === 'radio') {
+        const radioValue = field.options.find(opt => opt.label === ans.answer || opt.value === ans.answer);
+        if (radioValue) {
+          const radio = document.querySelector(`input[name="${field.name}"][value="${radioValue.value}"]`);
+          if (radio) radio.click();
+        }
+      } else if (field.type === 'checkbox') {
+        const answerArray = Array.isArray(ans.answer) ? ans.answer : [ans.answer];
+        for (const val of answerArray) {
+          const cb = document.querySelector(field.selector.replace(/\[value="[^"]*"\]/, `[value="${val}"]`));
+          if (cb && !cb.checked) cb.click();
+        }
+      } else if (field.type === 'select') {
+        const sel = document.querySelector(field.selector);
+        if (sel) {
+          const option = Array.from(sel.options).find(opt => opt.text === ans.answer || opt.value === ans.answer);
+          if (option) {
+            sel.value = option.value;
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        }
+      }
+    }
+
+    // Найти и нажать кнопку отправки
+    const submitBtn = document.querySelector('button[type="submit"], input[type="submit"], [data-qa="vacancy-response-submit"]');
+    if (submitBtn) {
+      submitBtn.click();
+      await sendLog('info', 'Отправлена форма с дополнительными вопросами', { url: window.location.href });
+      await new Promise(r => setTimeout(r, 4000));
+      return true;
+    } else {
+      await sendLog('error', 'Кнопка отправки не найдена на странице вопросов');
+      return false;
+    }
+  }
+
   // ========== Основная логика ==========
   try {
     if (hhState === 'check_login') {
@@ -720,14 +886,12 @@
 
       const limit = Math.min(vacanciesToSort.length, settings.maxVacanciesToProcess);
       const multipleList = vacanciesToSort.slice(0, limit);
-
       await chrome.storage.local.set({
         multipleVacanciesList: multipleList,
         currentMultipleIndex: 0,
         hhState: 'process_multiple_vacancies',
         searchUrl: window.location.href
       });
-
       const firstVacancy = multipleList[0];
       await sendLog('info', `д14 открыл вакансию с рейтингом ${firstVacancy.deepseek_rating ?? 'нет'}`, { url: firstVacancy.url, rating: firstVacancy.deepseek_rating });
       window.location.reload();
@@ -757,7 +921,14 @@
 
       if (currentUrl.includes('/applicant/vacancy_response')) {
         if (currentUrl.includes('startedWithQuestion')) {
-          await sendLog('info', 'д15 доп вопросы', { url: window.location.href });
+          if (settings.useLocalLLM) {
+            const success = await processQuestionsPage(searchTabId, searchUrl);
+            if (!success) {
+              await sendLog('error', 'Не удалось обработать страницу с вопросами, пропускаем вакансию');
+            }
+          } else {
+            await sendLog('info', 'д15 доп вопросы (LLM отключена, пропускаем)', { url: window.location.href });
+          }
         }
         const newIndex = currentMultipleIndex + 1;
         await chrome.storage.local.set({ currentMultipleIndex: newIndex });
@@ -797,29 +968,46 @@
         await sendLog('info', 'д30 буду откликаться, новая', { url: window.location.href });
         responseButton.click();
 
-        // Ожидание появления модального окна или изменения URL (до waitForResponseSec секунд)
-        let startTime = Date.now();
-        let modal = null;
-        let urlChanged = false;
-        const originalUrl = window.location.href;
-
-        while ((Date.now() - startTime) < settings.waitForResponseSec * 1000) {
-          await new Promise(r => setTimeout(r, 100));
-          if (window.location.href !== originalUrl) {
-            urlChanged = true;
+        let waitStart = Date.now();
+        let hasQuestions = false;
+        let modalAppeared = false;
+        while ((Date.now() - waitStart) < settings.waitForResponseSec * 1000) {
+          await new Promise(r => setTimeout(r, 200));
+          const currentUrlNow = window.location.href;
+          if (currentUrlNow.includes('startedWithQuestion')) {
+            hasQuestions = true;
             break;
           }
-          modal = document.querySelector('[aria-modal="true"][role="dialog"]');
-          if (modal) break;
+          if (document.querySelector('[aria-modal="true"][role="dialog"]')) {
+            modalAppeared = true;
+            break;
+          }
         }
 
-        if (urlChanged) {
-          // Произошёл переход – новая страница будет обработана при следующем запуске
-          return;
+        if (hasQuestions) {
+          if (settings.useLocalLLM) {
+            // Переход на страницу вопросов – она будет обработана в блоке выше (/applicant/vacancy_response)
+            return;
+          } else {
+            await sendLog('info', 'д15 доп вопросы (LLM отключена, пропускаем)', { url: window.location.href });
+            const newIndex = currentMultipleIndex + 1;
+            await chrome.storage.local.set({ currentMultipleIndex: newIndex });
+            const currentTabId = await getCurrentTabId();
+            if (currentTabId) await closeVacancyTab(currentTabId);
+            if (searchTabId) {
+              chrome.tabs.update(searchTabId, { active: true }, () => {
+                chrome.tabs.reload(searchTabId);
+              });
+            } else if (searchUrl) {
+              await openInNewTab(searchUrl);
+            } else {
+              window.location.reload();
+            }
+            return;
+          }
         }
 
-        if (modal) {
-          // Модальное окно найдено – обрабатываем
+        if (modalAppeared) {
           await sendLog('info', 'д16 модальное окно, буду определять разновидность', { url: window.location.href });
           await new Promise(resolve => setTimeout(resolve, settings.modalWaitSec * 1000));
           const modalType = await detectModalType();
@@ -832,11 +1020,11 @@
           } else {
             typeForLog = 'симпл2';
             await sendLog('info', 'д162 модальное окно вида симпл2(предполагаю)', { url: window.location.href });
-            const modalWindow = document.querySelector('[aria-modal="true"][role="dialog"]');
-            if (modalWindow) {
-              const letterInput = modalWindow.querySelector('[data-qa="vacancy-response-popup-form-letter-input"]');
-              const resumeSelect = modalWindow.querySelector('[data-qa="resume-title"]');
-              const submitBtn = modalWindow.querySelector('[data-qa="vacancy-response-submit-popup"]');
+            const modal = document.querySelector('[aria-modal="true"][role="dialog"]');
+            if (modal) {
+              const letterInput = modal.querySelector('[data-qa="vacancy-response-popup-form-letter-input"]');
+              const resumeSelect = modal.querySelector('[data-qa="resume-title"]');
+              const submitBtn = modal.querySelector('[data-qa="vacancy-response-submit-popup"]');
               const elementsFound = {
                 letterInput: !!letterInput,
                 resumeSelect: !!resumeSelect,
@@ -892,7 +1080,6 @@
           return;
         }
 
-        // Ни модального окна, ни перехода – нештатная ситуация
         await sendLog('debug', 'дусл3 неформат', { url: window.location.href });
         await chrome.storage.local.remove(['hhState', 'sessionId', 'hhStateTimestamp', 'processStartTime', 'multipleVacanciesList', 'currentMultipleIndex']);
         const { processStartTime } = await chrome.storage.local.get(['processStartTime']);
