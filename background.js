@@ -7,7 +7,7 @@ const DEFAULT_SETTINGS = {
   rank_deepseek: 0,
   deepseek_timeout: 60,
   deepseek_refresh: 3,
-  test_vacancy: 'https://hh.ru/vacancy/134089263?hhtmFrom=vacancy_response',
+  test_vacancy: 'https://vidnoe.hh.ru/vacancy/133953200?hhtmFrom=vacancy_response',
   modalWaitSec: 2,
   waitForResponseSec: 10,
   logUrl: 'http://localhost:8000/api/v1/logs',
@@ -148,6 +148,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 });
 
 chrome.action.onClicked.addListener(async (tab) => {
+  await chrome.storage.local.set({ manualStart: true });
   await stopExtension(tab.id);
   currentSessionId = generateSessionId();
   await chrome.storage.local.set({ sessionId: currentSessionId });
@@ -457,51 +458,93 @@ ${JSON.stringify(cleanedToRank, null, 2)}
     return true;
   }
 
-  // ===== ОБРАБОТЧИК ЗАПРОСОВ К ЛОКАЛЬНОЙ LLM =====
+  // ===== ОБРАБОТЧИК ЗАПРОСОВ К ЛОКАЛЬНОЙ LLM (ИСПРАВЛЕН) =====
   if (message.type === 'CALL_LLM') {
     (async () => {
       try {
-        const { fields, resume_text, endpoint } = message;
-        const prompt = `Ты – помощник соискателя. На основе резюме кандидата ответь на вопросы. Ответы должны быть правдивыми, краткими. Для radio – выбери один из вариантов. Для checkbox – выбери подходящие (массив). Для text/textarea – напиши ответ строкой.
+        const { fields, endpoint } = message;
+        const resume_text = currentSettings?.resume_text || '';
+        const coverLetter = currentSettings?.coverLetter || '';
+        const extra_data = currentSettings?.extra_data || '';
+
+        const prompt = `Ответь на вопросы, используя только данные из резюме, сопроводительного письма и доп. информации. Верни JSON-массив.
+
+Пример правильного ответа:
+[{"question": "Укажите зарплатные ожидания", "answer": "300000"}]
 
 Резюме:
 ${resume_text}
 
+Письмо:
+${coverLetter}
+
+Доп.инфо:
+${extra_data}
+
 Вопросы:
 ${JSON.stringify(fields, null, 2)}
 
-Верни только JSON в формате: [{"question": "текст вопроса", "answer": "ответ или массив ответов"}]. Не добавляй пояснений.`;
+JSON-массив:`;
 
-        await sendLog('debug', 'Отправка запроса к локальной LLM', { endpoint, fieldsCount: fields.length });
+        await sendLog('debug', 'д15 отправка в локальную llm', {
+          endpoint,
+          fieldsCount: fields.length,
+          promptLength: prompt.length,
+          prompt: prompt
+        });
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 секунд таймаут
 
         const response = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             prompt: prompt,
-            max_tokens: 2000,
-            temperature: 0.3,
-            top_p: 0.9,
-            stop: ['</s>', '<|im_end|>', '\n\n']
-          })
+            max_tokens: 512,
+            temperature: 0.0,
+            top_p: 0.0,
+            stop: ['<|im_end|>']
+          }),
+          signal: controller.signal
         });
+        clearTimeout(timeoutId);
 
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
         let content = data.choices[0].text;
+
+        await sendLog('debug', 'д15 ответ от local llm', {
+          content: content
+        });
+
         const jsonMatch = content.match(/\[[\s\S]*\]/);
         if (jsonMatch) {
-          const answers = JSON.parse(jsonMatch[0]);
-          await sendLog('info', 'LLM успешно сформировала ответы', { answersCount: answers.length });
-          sendResponse({ success: true, answers });
+          try {
+            const answers = JSON.parse(jsonMatch[0]);
+            await sendLog('info', 'LLM успешно сформировала ответы', { answersCount: answers.length });
+            sendResponse({ success: true, answers });
+          } catch (e) {
+            sendResponse({
+              success: false,
+              invalidJson: true,
+              content: content,
+              request: { fields, resume_text, coverLetter, extra_data, endpoint, prompt }
+            });
+          }
         } else {
-          throw new Error('Не удалось извлечь JSON из ответа LLM');
+          sendResponse({
+            success: false,
+            invalidJson: true,
+            content: content,
+            request: { fields, resume_text, coverLetter, extra_data, endpoint, prompt }
+          });
         }
       } catch (err) {
-        await sendLog('error', `Ошибка при вызове локальной LLM: ${err.message}`);
+        await sendLog('error', `д15 Ошибка при вызове локальной LLM: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     })();
-    return true; // асинхронный ответ
+    return true; // <-- ВАЖНО: возвращаем true для асинхронного ответа
   }
 });
