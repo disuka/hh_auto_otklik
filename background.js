@@ -1,674 +1,550 @@
-// background.js - фоновый скрипт расширения для управления автоматизацией
-
-const CONFIG = {
-  minDelay: 2000,
-  maxDelay: 4000,
-  maxVacancies: 15,
-  doneDelay: 12000,
-  excludeKeywords: ['разработчик', 'реклам'],
-  coverLetter: `Добрый день.
-Мой профессиональный путь в сфере информационных технологий охватывает 14 лет, из которых 10 лет я проработал в Альфа-Банке, где прошёл путь от аналитика до руководителя. За это время я получил углублённую экспертизу в построении сложных высоконагруженных систем, управлении командами и автоматизации бизнес-процессов. Считаю, что мой опыт и навыки будут полезны вашей команде.
-С третьего года работы начал активно развиваться в роли руководителя:
-Согласовывал техническую документацию, проводил регулярные отчётные встречи перед заказчиком.
-Выполнял функции TeamLead и TechLead направления, став единой точкой входа для смежных подразделений.
-Руководил интеграцией множества систем (учётные системы, платформы клиентских профилей, ядро), оптимизируя их взаимодействие в процессе модернизации.
-Управлял командой: предложил и реализовал объединение смежной команды, что позволило сконцентрировать экспертизу и сократить трудоёмкость на 20%.
-В качестве хобби развиваю технические навыки:
-Администрирую серверы на FreeBSD (Nginx/Apache, VPN, почтовые сервисы), что помогает лучше понимать задачи DevOps.
-Настраиваю среду для домашних веб-приложений (HTML, DNS, СУБД).
-Пишу небольшие приложения на Python, JS, PHP, C# для автоматизации, парсинга данных и обработки информации.
-Активно использую AI-инструменты (KODA, DeepSeek, ChatGPT) для ускорения разработки и изучения новых подходов.
-Это позволяет мне находить общий язык с техническими специалистами, точнее формулировать требования и предлагать нестандартные решения.
-Чем не хотел бы заниматься? Рутинные действия снижают мою эффективность, поэтому я всегда стремлюсь их автоматизировать.
-Что отличает меня:
-Ориентация на результат. Беру ответственность за сложные задачи, выстраиваю в команде единый подход, что помогает избегать срывов сроков.
-Проактивность. Предлагаю оптимизации на этапе оценки проекта, например, замену устаревших интеграций на целевые решения, что экономит ресурсы компании.
-Нетоксичность. Умею работать в командах разного возраста, ценю обратную связь, что подтверждается карьерным ростом и высокими годовыми оценками.
-Почему именно я? Ищу вакансию, где смогу применить свой управленческий, архитектурный и технический опыт. Готов решать комплексные задачи, требующие аналитического мышления, управления процессами и командами, умения вникать в детали и принимать решения в условиях неполной информации. Мне интересна смена предметной области — положительно отношусь к необходимости учиться новому.
-Буду рад обсудить, как мой опыт поможет достижению ваших бизнес-целей.
-В настоящее время проживаю в г. Москва, имею военный билет.
-Желаемый уровень заработной платы — 300 000 рублей.
-Спасибо за внимание!
-Вихров Денис Валерьевич
-for.vikhrov@mail.ru
-`
+// background.js
+const DEFAULT_SETTINGS = {
+  minDelaySec: 3,
+  maxDelaySec: 9,
+  maxPages: 1,
+  maxVacanciesToProcess: 23,
+  rank_deepseek: 0,
+  deepseek_timeout: 60,
+  deepseek_refresh: 3,
+  test_vacancy: 'https://vidnoe.hh.ru/vacancy/133953200?hhtmFrom=vacancy_response',
+  modalWaitSec: 2,
+  waitForResponseSec: 10,
+  logUrl: 'http://localhost:8000/api/v1/logs',
+  healthUrl: 'http://localhost:8000/health',
+  logApiKey: 'secret-key-for-hh-browser',
+  project: 'my-bot',
+  token_dlya_get_config: 'token_dlya_rasshirennia',
+  useLocalLLM: true,
+  localLLMEndpoint: 'http://localhost:5001/v1/completions',
+  localLLMModel: 'T-lite-it-2.1'
 };
 
-// Слушатель сообщений от инжектированных скриптов (вкладки вакансий)
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  console.log('[MESSAGE] Получено сообщение: ' + JSON.stringify(message));
-  console.log('[MESSAGE] sender.tab.id = ' + (sender.tab ? sender.tab.id : 'undefined'));
-  
-  if (message.action === 'responseSent') {
-    console.log('[MESSAGE] Отклик отправлен, жду ' + CONFIG.doneDelay + 'мс перед закрытием вкладки');
-    
-    setTimeout(async () => {
-      if (sender.tab && sender.tab.id) {
-        try {
-          await chrome.tabs.remove(sender.tab.id);
-          console.log('[MESSAGE] Закрыл вкладку вакансии id=' + sender.tab.id);
-        } catch (error) {
-          console.log('[MESSAGE] Ошибка при закрытии вкладки: ' + error.message);
-        }
-      }
-    }, CONFIG.doneDelay);
+let currentSessionId = null;
+let currentSettings = null;
+let rankingCache = new Map();
+
+function generateSessionId() {
+  const now = new Date();
+  const hours = now.getHours().toString().padStart(2, '0');
+  const minutes = now.getMinutes().toString().padStart(2, '0');
+  const random = Math.random().toString(36).substring(2, 8);
+  return `${hours}:${minutes}-${random}`;
+}
+
+async function sendLog(level, message, metadata = {}) {
+  if (!currentSessionId) {
+    currentSessionId = generateSessionId();
+    await chrome.storage.local.set({ sessionId: currentSessionId });
   }
-  
-  if (message.action === 'closeTab') {
-    console.log('[MESSAGE] Закрыть вкладку. Причина: ' + message.reason);
-    
-    setTimeout(async () => {
-      if (sender.tab && sender.tab.id) {
-        try {
-          await chrome.tabs.remove(sender.tab.id);
-          console.log('[MESSAGE] Закрыл вкладку вакансии id=' + sender.tab.id);
-        } catch (error) {
-          console.log('[MESSAGE] Ошибка при закрытии вкладки: ' + error.message);
-        }
+  const settings = currentSettings || DEFAULT_SETTINGS;
+  const logData = {
+    project: settings.project,
+    level,
+    message,
+    timestamp: new Date().toISOString(),
+    metadata: {
+      sessionId: currentSessionId,
+      ...metadata
+    }
+  };
+  const response = await fetch(settings.logUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-Key': settings.logApiKey
+    },
+    body: JSON.stringify(logData)
+  });
+  if (response.status !== 201) {
+    throw new Error(`Log server responded with ${response.status}`);
+  }
+}
+
+async function isLogServerHealthy() {
+  try {
+    const response = await fetch(DEFAULT_SETTINGS.healthUrl);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function getConfigViaHttp() {
+  const token = DEFAULT_SETTINGS.token_dlya_get_config;
+  const baseUrl = 'http://localhost:8080/get-value';
+  const keys = [
+    { key: 'resume', field: 'resume_text' },
+    { key: 'soprovod_pismo', field: 'coverLetter' },
+    { key: 'dop_info', field: 'extra_data' },
+    { key: 'deepseek_api_key', field: 'deepseek_api_key' }
+  ];
+  const result = {};
+  for (const item of keys) {
+    const url = `${baseUrl}?project=disa_hh_browser_rashirenie&key_name=${item.key}`;
+    try {
+      const response = await fetch(url, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.status !== 200) {
+        const responseText = await response.text();
+        await sendLog('error', `Ошибка получения параметра ${item.key}: HTTP ${response.status}`, {
+          requestUrl: url,
+          responseStatus: response.status,
+          responseBody: responseText.substring(0, 500),
+          hint: 'просьба проверить урлы: http://localhost:8080/health и http://localhost:8080/ready'
+        });
+        throw new Error(`HTTP ${response.status} for ${item.key}`);
       }
-    }, 2000);
+      const data = await response.json();
+      if (data && typeof data === 'object' && 'value' in data) {
+        result[item.field] = data.value;
+      } else {
+        await sendLog('warn', `Параметр ${item.key} не содержит поля "value", использую как есть`, { data });
+        result[item.field] = typeof data === 'string' ? data : JSON.stringify(data);
+      }
+    } catch (err) {
+      throw new Error(`Не удалось получить конфигурацию: ${err.message}`);
+    }
+  }
+  return result;
+}
+
+async function migrateSettings() {
+  const existing = await chrome.storage.local.get('settings');
+  if (!existing.settings) {
+    await chrome.storage.local.set({ settings: DEFAULT_SETTINGS });
+  }
+  return DEFAULT_SETTINGS;
+}
+
+async function stopExtension(tabId) {
+  await chrome.storage.local.remove([
+    'hhState', 'hhStateTimestamp', 'processStartTime',
+    'currentPage', 'allVacancies', 'maxPages',
+    'vacanciesToProcess', 'currentVacancyIndex', 'maxVacanciesToProcess',
+    'searchUrl', 'enrichedVacancies', 'sessionId',
+    'responseVacancyUrl', 'responseVacancyData', 'searchTabId',
+    'multipleVacanciesList', 'currentMultipleIndex'
+  ]);
+  await sendLog('info', 'РАСШИРЕНИЕ ОСТАНОВЛЕНО ПОЛЬЗОВАТЕЛЕМ', {});
+  if (tabId) {
+    chrome.tabs.reload(tabId);
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.contextMenus.create({
+    id: "stop_hh_auto",
+    title: "Остановить HH Auto",
+    contexts: ["action"]
+  });
+});
+
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === "stop_hh_auto") {
+    await stopExtension(tab.id);
   }
 });
 
-// Случайная задержка
-function randomDelay() {
-  const delay = Math.floor(Math.random() * (CONFIG.maxDelay - CONFIG.minDelay + 1)) + CONFIG.minDelay;
-  return new Promise(resolve => setTimeout(resolve, delay));
-}
-
-// Ожидание загрузки вкладки
-function waitForTabLoad(tabId) {
-  return new Promise(resolve => {
-    const listener = (tabId2, changeInfo, tab) => {
-      if (tabId2 === tabId && changeInfo.status === 'complete') {
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }
-    };
-    chrome.tabs.onUpdated.addListener(listener);
-  });
-}
-
-// Правило выбора резюме (ПВР1)
-function selectResumeByRule(vacancyTitle) {
-  const title = vacancyTitle.toLowerCase();
-  
-  if (title.includes('отдела')) return 'Руководитель отдела';
-  
-  if (title.includes('руководитель направления') || 
-      title.includes('деливери') || 
-      title.includes('delivery') ||
-      title.includes('релиз')) {
-    return 'Руководитель направления';
+chrome.action.onClicked.addListener(async (tab) => {
+  await chrome.storage.local.set({ manualStart: true });
+  await stopExtension(tab.id);
+  currentSessionId = generateSessionId();
+  await chrome.storage.local.set({ sessionId: currentSessionId });
+  const healthy = await isLogServerHealthy();
+  if (!healthy) {
+    console.error('Сервер логирования недоступен, работа остановлена');
+    return;
   }
-  
-  if (title.includes('аналитик') || 
-      title.includes('системн') || 
-      title.includes('анализа')) {
-    return 'Аналитик';
-  }
-  
-  if (title.includes('проект') || 
-      title.includes('менеджер') || 
-      title.includes('руководитель проект') || 
-      title.includes('project manager')) {
-    return 'Руководитель проектов';
-  }
-  
-  return 'Руководитель направления';
-}
-
-// Основная функция автоматизации
-async function startAutomation() {
+  let settings = await migrateSettings();
+  let config;
   try {
-    // Шаг 1: Проверка авторизации
-    const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    console.log('Текущая вкладка: ' + currentTab.url);
-    
-    const authResult = await chrome.scripting.executeScript({
-      target: { tabId: currentTab.id },
-      func: () => {
-        const profileElement = document.querySelector('[data-qa="mainmenu_profileAndResumes"]');
-        if (!profileElement) return { success: false };
-        return { success: true };
+    config = await getConfigViaHttp();
+  } catch (err) {
+    await sendLog('error', `д0: ${err.message}`, {});
+    return;
+  }
+  currentSettings = { ...settings, ...config };
+  await chrome.storage.local.set({ settings: currentSettings });
+  await sendLog('info', 'д1 начало', { settings: currentSettings });
+  await chrome.storage.local.set({
+    hhState: 'check_login',
+    hhStateTimestamp: Date.now(),
+    processStartTime: Date.now()
+  });
+  chrome.tabs.reload(tab.id);
+});
+
+function extractJsonFromText(text) {
+  const firstBrace = text.indexOf('{');
+  const lastBrace = text.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    const jsonCandidate = text.substring(firstBrace, lastBrace + 1);
+    try {
+      return JSON.parse(jsonCandidate);
+    } catch (e) {}
+  }
+  const regex = /\{[\s\S]*\}/;
+  const match = text.match(regex);
+  if (match) {
+    try {
+      return JSON.parse(match[0]);
+    } catch (e) {}
+  }
+  return null;
+}
+
+function prepareVacanciesForRanking(vacancies) {
+  return vacancies.map(vac => ({
+    url: vac.url,
+    title: vac.title || vac.title_detail || '',
+    company: vac.company || vac.company_detail || '',
+    fullDescription: vac.fullDescription_detail || ''
+  }));
+}
+
+async function callDeepSeekWithRetry(prompt, apiKey, timeoutSec, retries) {
+  let lastError = null;
+  let tokensUsed = null;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutSec * 1000);
+
+    const requestBody = {
+      model: 'deepseek-v4-flash',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.3,
+      response_format: { type: 'json_object' }
+    };
+    const bodyString = JSON.stringify(requestBody);
+    const requestSizeKB = (bodyString.length / 1024).toFixed(2);
+    const startTime = Date.now();
+
+    await sendLog('info', 'д13. буду отправлять в дипсик', {
+      url: 'https://api.deepseek.com/v1/chat/completions',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: requestBody,
+      attempt: attempt + 1,
+      request_size_kb: requestSizeKB
+    });
+
+    try {
+      const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: bodyString,
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+
+      if (!response.ok) throw new Error(`DeepSeek API error: ${response.status}`);
+      const data = await response.json();
+      tokensUsed = data.usage;
+
+      await sendLog('debug', 'д13 ответ от дипсик (сырой)', {
+        ...data,
+        elapsed_seconds: elapsedSec
+      });
+
+      const content = data.choices[0].message.content;
+      const parsed = extractJsonFromText(content);
+      if (parsed) return { result: parsed, tokens: tokensUsed };
+
+      if (attempt < retries) {
+        await sendLog('warn', `DeepSeek вернул невалидный JSON, повторная попытка ${attempt+1}`, { content });
+        prompt = prompt + "\n\nВАЖНО: Верни ТОЛЬКО валидный JSON. Никаких пояснений, только JSON. Начинай с { и заканчивай }.";
+        continue;
+      }
+      throw new Error(`Не удалось извлечь JSON из ответа DeepSeek: ${content}`);
+    } catch (err) {
+      clearTimeout(timeoutId);
+      lastError = err;
+      if (attempt < retries) {
+        await sendLog('warn', `Ошибка вызова DeepSeek, попытка ${attempt+1}: ${err.message}`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+  }
+
+  await sendLog('error', 'д13 дипсик не отвечает', { error: lastError?.message });
+  throw lastError;
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'LOG') {
+    sendLog(message.level, message.message, message.metadata)
+      .then(() => sendResponse({ success: true }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'GET_STATE') {
+    (async () => {
+      let sessionId = currentSessionId;
+      if (!sessionId) {
+        const stored = await chrome.storage.local.get('sessionId');
+        sessionId = stored.sessionId || null;
+      }
+      const stored = await chrome.storage.local.get(['settings', 'hhState']);
+      sendResponse({
+        settings: stored.settings || currentSettings,
+        sessionId: sessionId,
+        hhState: stored.hhState || null
+      });
+    })();
+    return true;
+  }
+
+  if (message.type === 'SAVE_SEARCH_URL') {
+    chrome.storage.local.set({ searchUrl: message.url });
+    sendResponse({ success: true });
+    return false;
+  }
+
+  if (message.type === 'GET_CURRENT_TAB_ID') {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs && tabs.length > 0) {
+        sendResponse({ tabId: tabs[0].id });
+      } else {
+        sendResponse({ tabId: null });
       }
     });
-    
-    if (!authResult[0].result.success) {
-      console.log('Не залогинен. Останов');
-      return;
-    }
-    console.log('Авторизация подтверждена');
-    
-    // Шаг 2: Переход на vidnoe.hh.ru
-    console.log('Переход на vidnoe.hh.ru...');
-    await randomDelay();
-    
-    const vidnoeTab = await chrome.tabs.create({ 
-      url: 'https://vidnoe.hh.ru/?hhtmFrom=main', 
-      active: true 
+    return true;
+  }
+
+  if (message.type === 'OPEN_NEW_TAB') {
+    chrome.tabs.create({ url: message.url, active: true }, (tab) => {
+      sendResponse({ success: true, tabId: tab.id });
     });
-    await waitForTabLoad(vidnoeTab.id);
-    await randomDelay();
-    console.log('перешел на начальную страницу');
-    
-    // Шаг 3: Переход к списку резюме
-    console.log('Переход к списку резюме...');
-    await randomDelay();
-    
-    const resumeUrl = 'https://vidnoe.hh.ru/applicant/resumes';
-    const resumeTab = await chrome.tabs.create({ url: resumeUrl, active: true });
-    await waitForTabLoad(resumeTab.id);
-    await randomDelay();
-    console.log('перешел на список резюме');
-    
-    // Шаг 4: Получение списка резюме
-    const resumeListResult = await chrome.scripting.executeScript({
-      target: { tabId: resumeTab.id },
-      func: () => {
-        const resumeData = [];
-        const resumeCards = document.querySelectorAll('[data-qa^="resume-card-link-"]');
-        
-        resumeCards.forEach(card => {
-          const href = card.href || '';
-          if (!href.includes('/resume/')) return;
-          
-          const titleEl = card.querySelector('[data-qa="resume-title"]');
-          const titleContentEl = titleEl ? titleEl.querySelector('[data-qa="cell-text-content"]') : null;
-          const title = titleContentEl ? titleContentEl.textContent.trim() : '';
-          
-          if (title && !resumeData.includes(title)) {
-            resumeData.push(title);
-          }
-        });
-        
-        if (resumeData.length === 0) {
-          const allLinks = document.querySelectorAll('a[href*="/resume/"]');
-          allLinks.forEach(link => {
-            const title = link.textContent.trim().split('\n')[0].substring(0, 100);
-            if (title && title.length > 2 && !resumeData.includes(title)) {
-              resumeData.push(title);
+    return true;
+  }
+
+  if (message.type === 'CLOSE_VACANCY_TAB') {
+    const vacancyTabId = message.tabId;
+    if (vacancyTabId) {
+      chrome.tabs.remove(vacancyTabId, async () => {
+        setTimeout(async () => {
+          const { searchTabId } = await chrome.storage.local.get('searchTabId');
+          if (searchTabId) {
+            chrome.tabs.reload(searchTabId);
+          } else {
+            const { searchUrl } = await chrome.storage.local.get('searchUrl');
+            if (searchUrl) {
+              const tabs = await chrome.tabs.query({ url: searchUrl });
+              if (tabs.length > 0) {
+                chrome.tabs.reload(tabs[0].id);
+              }
             }
+          }
+        }, 1000);
+        sendResponse({ success: true });
+      });
+    } else {
+      sendResponse({ success: false, error: 'No tabId provided' });
+    }
+    return true;
+  }
+
+  if (message.type === 'SAVE_SEARCH_TAB_ID') {
+    chrome.storage.local.set({ searchTabId: message.tabId });
+    sendResponse({ success: true });
+    return false;
+  }
+
+  if (message.type === 'RANK_VACANCIES') {
+    (async () => {
+      try {
+        const settings = currentSettings || await migrateSettings();
+        if (!settings.deepseek_api_key || settings.rank_deepseek !== 1) {
+          sendResponse({ success: false, error: 'DeepSeek ranking disabled or no API key' });
+          return;
+        }
+        const { vacancies, resume, coverLetter, extraData } = message;
+
+        const cleanedVacancies = prepareVacanciesForRanking(vacancies);
+
+        const prompt = `Ты — эксперт по найму ИТ-специалистов. Проанализируй следующие вакансии и определи, насколько они подходят кандидату.
+
+Резюме кандидата:
+${resume}
+
+Сопроводительное письмо:
+${coverLetter}
+
+Дополнительные данные о кандидате:
+${extraData}
+
+Вакансии (в формате JSON):
+${JSON.stringify(cleanedVacancies, null, 2)}
+
+Задача: для каждой вакансии присвой рейтинг от 0 до 100 (0 — не подходит, 100 — идеально подходит) и напиши краткое обоснование (до 1000 символов). Верни результат в формате JSON, где ключи — URL вакансий, а значение — объект с полями "deepseek_rating" и "reason". Не включай в ответ ничего, кроме JSON.`;
+
+        await sendLog('info', 'д13. буду отправлять в дипсик (контекст)', {
+          vacancies_count: vacancies.length,
+          vacancies_urls: vacancies.map(v => v.url),
+          resume_length: resume.length,
+          coverLetter_length: coverLetter.length,
+          extraData_length: extraData.length,
+          prompt_length: prompt.length,
+          prompt: prompt
+        });
+
+        const cacheHits = [];
+        const cacheMisses = [];
+        const vacanciesToRank = [];
+        for (const vac of vacancies) {
+          const cached = rankingCache.get(vac.url);
+          if (cached) {
+            cacheHits.push({ url: vac.url, rating: cached.rating, reason: cached.reason });
+          } else {
+            cacheMisses.push(vac.url);
+            vacanciesToRank.push(vac);
+          }
+        }
+
+        let deepseekResult = {};
+        for (const hit of cacheHits) {
+          deepseekResult[hit.url] = { deepseek_rating: hit.rating, reason: hit.reason };
+        }
+
+        if (vacanciesToRank.length > 0) {
+          const cleanedToRank = prepareVacanciesForRanking(vacanciesToRank);
+          const promptForNew = `Ты — эксперт по найму ИТ-специалистов. Проанализируй следующие вакансии и определи, насколько они подходят кандидату.
+
+Резюме кандидата:
+${resume}
+
+Сопроводительное письмо:
+${coverLetter}
+
+Дополнительные данные о кандидате:
+${extraData}
+
+Вакансии (в формате JSON):
+${JSON.stringify(cleanedToRank, null, 2)}
+
+Задача: для каждой вакансии присвой рейтинг от 0 до 100 (0 — не подходит, 100 — идеально подходит) и напиши краткое обоснование (до 1000 символов). Верни результат в формате JSON, где ключи — URL вакансий, а значение — объект с полями "deepseek_rating" и "reason". Не включай в ответ ничего, кроме JSON.`;
+          const { result } = await callDeepSeekWithRetry(promptForNew, settings.deepseek_api_key, settings.deepseek_timeout, settings.deepseek_refresh);
+          for (const [url, value] of Object.entries(result)) {
+            const rating = typeof value === 'object' ? (value.deepseek_rating ?? value.my_rating ?? value.rating ?? 0) : value;
+            const reason = typeof value === 'object' ? (value.reason ?? '') : '';
+            rankingCache.set(url, { rating: rating, reason: reason });
+            deepseekResult[url] = { deepseek_rating: rating, reason: reason };
+          }
+        }
+
+        const finalRanked = vacancies.map(vac => ({
+          ...vac,
+          deepseek_rating: deepseekResult[vac.url]?.deepseek_rating ?? 0,
+          reason: deepseekResult[vac.url]?.reason ?? ''
+        }));
+
+        sendResponse({ success: true, ranked: finalRanked });
+      } catch (err) {
+        await sendLog('error', `Ошибка ранжирования: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
+  // ===== ОБРАБОТЧИК ЗАПРОСОВ К ЛОКАЛЬНОЙ LLM (ИСПРАВЛЕН) =====
+  if (message.type === 'CALL_LLM') {
+    (async () => {
+      try {
+        const { fields, endpoint } = message;
+        const resume_text = currentSettings?.resume_text || '';
+        const coverLetter = currentSettings?.coverLetter || '';
+        const extra_data = currentSettings?.extra_data || '';
+
+        const prompt = `Ответь на вопросы, используя только данные из резюме, сопроводительного письма и доп. информации. Верни JSON-массив.
+
+Пример правильного ответа:
+[{"question": "Укажите зарплатные ожидания", "answer": "300000"}]
+
+Резюме:
+${resume_text}
+
+Письмо:
+${coverLetter}
+
+Доп.инфо:
+${extra_data}
+
+Вопросы:
+${JSON.stringify(fields, null, 2)}
+
+JSON-массив:`;
+
+        await sendLog('debug', 'д15 отправка в локальную llm', {
+          endpoint,
+          fieldsCount: fields.length,
+          promptLength: prompt.length,
+          prompt: prompt
+        });
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 секунд таймаут
+
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: prompt,
+            max_tokens: 512,
+            temperature: 0.0,
+            top_p: 0.0,
+            stop: ['<|im_end|>']
+          }),
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        let content = data.choices[0].text;
+
+        await sendLog('debug', 'д15 ответ от local llm', {
+          content: content
+        });
+
+        const jsonMatch = content.match(/\[[\s\S]*\]/);
+        if (jsonMatch) {
+          try {
+            const answers = JSON.parse(jsonMatch[0]);
+            await sendLog('info', 'LLM успешно сформировала ответы', { answersCount: answers.length });
+            sendResponse({ success: true, answers });
+          } catch (e) {
+            sendResponse({
+              success: false,
+              invalidJson: true,
+              content: content,
+              request: { fields, resume_text, coverLetter, extra_data, endpoint, prompt }
+            });
+          }
+        } else {
+          sendResponse({
+            success: false,
+            invalidJson: true,
+            content: content,
+            request: { fields, resume_text, coverLetter, extra_data, endpoint, prompt }
           });
         }
-        
-        return resumeData;
+      } catch (err) {
+        await sendLog('error', `д15 Ошибка при вызове локальной LLM: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
       }
-    });
-    
-    const resumeList = resumeListResult[0].result;
-    console.log('Список резюме:');
-    resumeList.forEach(name => console.log('  - ' + name));
-    
-    if (resumeList.length === 0) {
-      console.log('не нашел ни одного резюме');
-      return;
-    }
-    
-    // Обрабатываем каждое резюме
-    for (let r = 0; r < resumeList.length; r++) {
-      const currentResumeName = resumeList[r];
-      console.log('=== Обработка резюме ' + (r+1) + '/' + resumeList.length + ': ' + currentResumeName + ' ===');
-      
-      const resumeLinkResult = await chrome.scripting.executeScript({
-        target: { tabId: resumeTab.id },
-        func: (resumeName) => {
-          const resumeLinks = document.querySelectorAll('a');
-          for (const link of resumeLinks) {
-            if (link.textContent.toLowerCase().includes(resumeName.toLowerCase()) && link.href.includes('/resume/')) {
-              return link.href;
-            }
-          }
-          return null;
-        },
-        args: [currentResumeName]
-      });
-      
-      const currentResumeUrl = resumeLinkResult[0].result;
-      if (!currentResumeUrl) {
-        console.log('Не нашел ссылку на резюме ' + currentResumeName);
-        continue;
-      }
-      
-      const currentResumeTab = await chrome.tabs.create({ 
-        url: currentResumeUrl, 
-        active: true 
-      });
-      await waitForTabLoad(currentResumeTab.id);
-      await randomDelay();
-      
-      console.log('перешел на мое резюме = ' + currentResumeName + ' =');
-      
-      const vacancyLinkResult = await chrome.scripting.executeScript({
-        target: { tabId: currentResumeTab.id },
-        func: () => {
-          const allLinks = document.querySelectorAll('a');
-          for (const link of allLinks) {
-            const text = link.textContent.toLowerCase();
-            const href = link.href || '';
-            if (text.includes('подобрали для вас') && text.includes('подходящие вакансии')) {
-              return href;
-            }
-            if (href.includes('/search/vacancy') && href.includes('resume=')) {
-              return href;
-            }
-          }
-          return null;
-        }
-      });
-            
-      const vacancyLink = vacancyLinkResult[0].result;
-      if (!vacancyLink) {
-        console.log('Ссылка на вакансии не найдена');
-        await chrome.tabs.remove(currentResumeTab.id);
-        continue;
-      }
-      
-      const vacancyTab = await chrome.tabs.create({ 
-        url: vacancyLink, 
-        active: true 
-      });
-      await waitForTabLoad(vacancyTab.id);
-      await randomDelay();
-      
-      console.log('перешел на вакансии для резюме = ' + currentResumeName + ' =');
-    
-      // Шаг 7: Получаем список вакансий
-      console.log('Получение списка вакансий, лимит: ' + CONFIG.maxVacancies);
-      
-      const vacanciesResult = await chrome.scripting.executeScript({
-        target: { tabId: vacancyTab.id },
-        func: (maxVacancies) => {
-          const vacancies = [];
-          const vacancyCards = document.querySelectorAll('div[data-qa="vacancy-serp__vacancy"]');
-          
-          for (const card of vacancyCards) {
-            if (vacancies.length >= maxVacancies) break;
-            
-            const link = card.querySelector('a[data-qa="serp-item__title"], a[href*="/vacancy/"]');
-            if (!link) continue;
-            
-            const href = link.href || '';
-            if (!href.includes('/vacancy/') || href.includes('click') || href.includes('hot')) {
-              continue;
-            }
-            
-            let title = '';
-            const titleElement = card.querySelector('[data-qa="serp-item__title"], .vacancy-title, .bloko-header-section-3');
-            if (titleElement) {
-              title = titleElement.textContent.trim();
-            } else {
-              title = link.textContent.trim();
-            }
-            
-            if (title && title.length > 5) {
-              vacancies.push({ href, title });
-            }
-          }
-          return vacancies;
-        },
-        args: [CONFIG.maxVacancies]
-      });
-      
-      const vacancies = vacanciesResult[0].result;
-      console.log('Получено вакансий: ' + vacancies.length);
-      
-      const uniqueVacancies = [];
-      const seenHrefs = new Set();
-      for (const v of vacancies) {
-        if (!seenHrefs.has(v.href)) {
-          seenHrefs.add(v.href);
-          uniqueVacancies.push(v);
-        }
-      }
-      
-      const vacanciesToProcess = uniqueVacancies.slice(0, CONFIG.maxVacancies);
-      console.log('Найдено ' + vacanciesToProcess.length + ' уникальных вакансий');
-      
-      // Обрабатываем каждую вакансию
-      for (let i = 0; i < vacanciesToProcess.length; i++) {
-        const vacancy = vacanciesToProcess[i];
-        
-        const titleLower = vacancy.title.toLowerCase();
-        const shouldExclude = CONFIG.excludeKeywords.some(keyword => titleLower.includes(keyword.toLowerCase()));
-        
-        if (shouldExclude) {
-          console.log(vacancy.title + ' =пропущено= в соответствии с шаг7 ТЗ');
-          continue;
-        }
-        
-        console.log('Обрабатываю вакансию ' + (i+1) + '/' + CONFIG.maxVacancies + ': ' + vacancy.title);
-        console.log('URL: ' + vacancy.href);
-        
-        const selectedResume = selectResumeByRule(vacancy.title);
-        console.log('Выбрано резюме: ' + selectedResume);
-        
-console.log('Создаю вкладку для вакансии');
-        const vacancyDetailTab = await chrome.tabs.create({ 
-          url: vacancy.href,
-          active: false
-        });
-        console.log('Создана вкладка id=' + vacancyDetailTab.id);
-        
-        await waitForTabLoad(vacancyDetailTab.id);
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        
-        // Обрабатываем вакансию
-        try {
-          
-          let clickResult;
-          try {
-clickResult = await chrome.scripting.executeScript({
-              target: { tabId: vacancyDetailTab.id },
-              func: () => {
-                const respondButtons = document.querySelectorAll('button, a');
-                let respondButton = null;
-                
-                for (const btn of respondButtons) {
-                  const text = btn.textContent.toLowerCase().trim();
-                  if (text === 'откликнуться') {
-                    respondButton = btn;
-                    break;
-                  }
-                }
-                
-                if (!respondButton) {
-                  console.log('КНОПКА_ОТКЛИКНУТЬСЯ_НЕ_НАЙДЕНА');
-                  chrome.runtime.sendMessage({ action: 'closeTab', reason: 'кнопка откликнуться не найдена' });
-                  return false;
-                }
-                
-                console.log('кнопку =откликнуться= нашел, сейчас буду нажимать');
-                respondButton.click();
-                console.log('после нажатия на =откликнуться= все загружено успешно');
-                return true;
-              }
-            });
-            
-            if (!clickResult || !clickResult[0]) {
-              console.log('Ошибка: clickResult пустой');
-              await chrome.tabs.remove(vacancyDetailTab.id);
-              continue;
-            }
-            
-            if (!clickResult[0].result) {
-              console.log('Не удалось нажать кнопку "откликнуться", пропускаю вакансию');
-              await chrome.tabs.remove(vacancyDetailTab.id);
-              continue;
-            }
-          } catch (injectError) {
-            console.log('Ошибка при инжекции скрипта: ' + injectError.message);
-            await chrome.tabs.remove(vacancyDetailTab.id);
-            continue;
-          }
-          
-          console.log('Жду 5 секунд для проверки перезагрузки страницы...');
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          
-          let tabInfo;
-          try {
-            tabInfo = await chrome.tabs.get(vacancyDetailTab.id);
-          } catch (error) {
-            console.log('Вкладка уже закрыта: ' + error.message);
-            continue;
-          }
-          
-          if (tabInfo.url.includes('startedWithQuestion=false')) {
-            console.log('вакансия содержит дополнительные вопросы');
-            await chrome.tabs.remove(vacancyDetailTab.id);
-            console.log('Закрыл вкладку с дополнительными вопросами');
-            continue;
-          }
-          
-          try {
-            await chrome.scripting.executeScript({
-              target: { tabId: vacancyDetailTab.id },
-              func: (params) => {
-                const { resumeName, coverLetter } = params;
-                
-console.log('=Это новая вакансия=. Начинаю выполнять МОР1');
-                
-                const allDialogs = document.querySelectorAll('[role="dialog"]');
-                
-                if (allDialogs.length !== 1) {
-                  console.log('модальное не найдено. Останов');
-                  chrome.runtime.sendMessage({ action: 'closeTab', reason: 'модальное окно не определено' });
-                  return;
-                }
-                
-                const modal = allDialogs[0];
-                console.log('открылось модальное');
-                
-                const resumeElements = modal.querySelectorAll('[data-qa="resume-title"]');
-                if (resumeElements.length !== 1) {
-                  console.log('в модальном окне больше одного элемента выбора вакансии. останов.');
-                  chrome.runtime.sendMessage({ action: 'closeTab', reason: 'больше одного элемента выбора резюме' });
-                  return;
-                }
-                
-                const respondButtonInModal = modal.querySelector('[data-qa="vacancy-response-submit-popup"]');
-                if (!respondButtonInModal) {
-                  console.log('условие на нахождение элемента =откликнуться= в диалоговом окне не выполнено');
-                  chrome.runtime.sendMessage({ action: 'closeTab', reason: 'кнопка откликнуться не найдена в модальном окне' });
-                  return;
-                }
-                
-                const addLetterBtn = modal.querySelector('[data-qa="add-cover-letter"]');
-                const existingTextArea = modal.querySelector('textarea[data-qa="vacancy-response-popup-form-letter-input"]');
-                
-                let modalType = null;
-                
-                if (addLetterBtn && !respondButtonInModal.disabled) {
-                  modalType = 'simple1';
-                  console.log('Тип модального окна: simple1');
-                } else if (existingTextArea && !addLetterBtn && respondButtonInModal.disabled) {
-                  const textAreaValue = existingTextArea.value || '';
-                  const textAreaPlaceholder = existingTextArea.placeholder || '';
-                  const textareaWrapper = existingTextArea.closest('[data-qa="textarea-wrapper"]');
-                  const label = textareaWrapper ? textareaWrapper.querySelector('label') : null;
-                  const labelText = label ? label.textContent : '';
-                  
-                  if (textAreaValue.includes('Сопроводительное письмо') || 
-                      textAreaPlaceholder.includes('Сопроводительное письмо') ||
-                      labelText.includes('Сопроводительное письмо')) {
-                    modalType = 'simple2';
-                    console.log('Тип модального окна: simple2');
-                  }
-                }
-                
-                if (!modalType) {
-                  console.log('=тип модального окна не определен=, останов');
-                  chrome.runtime.sendMessage({ action: 'closeTab', reason: 'тип модального окна не определен' });
-                  return;
-                }
-                
-                if (modalType === 'simple1') {
-                  const allInputsInModal = modal.querySelectorAll('input, textarea');
-                  const visibleInputs = Array.from(allInputsInModal).filter(input => {
-                    const type = input.type || '';
-                    const name = input.name || '';
-                    return type !== 'hidden' && !name.includes('_xsrf') && !name.includes('csrf');
-                  });
-                  
-                  if (visibleInputs.length > 0) {
-                    console.log('есть непонятные поля ввода');
-                    chrome.runtime.sendMessage({ action: 'closeTab', reason: 'есть дополнительные вопросы' });
-                    return;
-                  }
-                }
-                
-                console.log('Ищу резюме: ' + resumeName);
-                
-                const resumeCard = modal.querySelector('[data-qa="resume-title"]');
-                if (resumeCard) {
-                  const cardElement = resumeCard.closest('[role="button"][tabindex="0"], button, [tabindex="0"]');
-                  if (cardElement) {
-                    cardElement.click();
-                    
-                    setTimeout(() => {
-                      let allResumeElements = document.querySelectorAll('[data-qa="resume-title"]');
-                      const uniqueResumes = [];
-                      const seenTitles = new Set();
-                      
-                      for (let i = 0; i < allResumeElements.length; i++) {
-                        const resumeEl = allResumeElements[i];
-                        const titleElement = resumeEl.querySelector('[data-qa="cell-text-content"]');
-                        if (titleElement) {
-                          const title = titleElement.textContent.trim();
-                          if (!seenTitles.has(title)) {
-                            seenTitles.add(title);
-                            uniqueResumes.push({ element: resumeEl, title: title });
-                          }
-                        }
-                      }
-                      
-if (uniqueResumes.length === 0) {
-                        console.log('Список резюме не открылся');
-                        chrome.runtime.sendMessage({ action: 'closeTab', reason: 'список резюме не открылся' });
-                        return;
-                      }
-                      
-                      console.log('Найдено резюме в списке: ' + uniqueResumes.length);
-                      console.log('Уникальных резюме: ' + uniqueResumes.length);
-                      
-                      let targetResume = null;
-                      const searchName = resumeName.toLowerCase();
-                      
-                      for (let i = 0; i < uniqueResumes.length; i++) {
-                        const resume = uniqueResumes[i];
-                        const title = resume.title.toLowerCase();
-                        console.log('Резюме ' + (i+1) + ': ' + resume.title);
-                        
-                        if (title.includes(searchName) || searchName.includes(title)) {
-                          targetResume = resume.element;
-                          console.log('Нашёл подходящее резюме: ' + resume.title);
-                        }
-                      }
-                      
-                      if (targetResume) {
-                        const targetCard = targetResume.closest('[role="button"][tabindex="0"], button, [tabindex="0"]');
-                        if (targetCard) {
-                          targetCard.click();
-                          console.log('Выбрано резюме: ' + targetResume.querySelector('[data-qa="cell-text-content"]').textContent);
-                        }
-                      }
-                    }, 1000);
-                  }
-                }
-                
-                // Основной таймаут после выбора резюме (увеличен для надежности)
-                // Для simple1: 1500мс на выбор резюме + 2000мс на применение = 3500мс
-                // Для simple2: резюме уже выбрано, но нужно время на инициализацию
-setTimeout(() => {
-                  if (modalType === 'simple2') {
-                    const textArea = modal.querySelector('textarea[data-qa="vacancy-response-popup-form-letter-input"]');
-                    if (textArea) {
-                      console.log('Нашёл поле для сопроводительного письма');
-                      textArea.value = coverLetter;
-                      textArea.dispatchEvent(new Event('input', { bubbles: true }));
-                      textArea.dispatchEvent(new Event('change', { bubbles: true }));
-                      textArea.dispatchEvent(new Event('blur', { bubbles: true }));
-                      textArea.focus();
-                      setTimeout(() => {
-                        textArea.blur();
-                        console.log('Вставил сопроводительное письмо');
-                        
-                        setTimeout(() => {
-                          const submitButton = modal.querySelector('[data-qa="vacancy-response-submit-popup"]');
-                          if (submitButton && !submitButton.disabled) {
-                            submitButton.click();
-                            console.log('Отправляю отклик');
-                            chrome.runtime.sendMessage({ action: 'responseSent' });
-                          } else {
-                            console.log('Кнопка отправки не найдена или заблокирована');
-                            chrome.runtime.sendMessage({ action: 'closeTab', reason: 'кнопка отправки не найдена' });
-                          }
-                        }, 1000);
-                      }, 100);
-                    } else {
-                      console.log('Поле для сопроводительного письма не найдено после нажатия кнопки');
-                      chrome.runtime.sendMessage({ action: 'closeTab', reason: 'поле не найдено' });
-                    }
-                    return;
-                  }
-                  
-                  if (!addLetterBtn) {
-                    console.log('Кнопка \'Добавить сопроводительное\' не найдена');
-                    chrome.runtime.sendMessage({ action: 'closeTab', reason: 'кнопка добавить не найдена' });
-                    return;
-                  }
-                  
-                  console.log('Нажимаю кнопку \'Добавить сопроводительное\'');
-                  addLetterBtn.click();
-                  
-                  setTimeout(() => {
-                    let textArea = modal.querySelector('textarea[data-qa="vacancy-response-popup-form-letter-input"]');
-                    
-                    if (!textArea) {
-                      textArea = document.querySelector('textarea[data-qa="vacancy-response-popup-form-letter-input"]');
-                    }
-                    
-                    if (textArea) {
-                      console.log('Нашёл поле для сопроводительного письма');
-                      textArea.value = coverLetter;
-                      textArea.dispatchEvent(new Event('input', { bubbles: true }));
-                      textArea.dispatchEvent(new Event('change', { bubbles: true }));
-                      textArea.dispatchEvent(new Event('blur', { bubbles: true }));
-                      textArea.focus();
-                      setTimeout(() => {
-                        textArea.blur();
-                        console.log('Вставил сопроводительное письмо');
-                        
-                        setTimeout(() => {
-                          const submitButton = modal.querySelector('[data-qa="vacancy-response-submit-popup"]');
-                          if (submitButton && !submitButton.disabled) {
-                            submitButton.click();
-                            console.log('Отправляю отклик');
-                            chrome.runtime.sendMessage({ action: 'responseSent' });
-                          } else {
-                            console.log('Кнопка отправки не найдена или заблокирована');
-                            chrome.runtime.sendMessage({ action: 'closeTab', reason: 'кнопка отправки не найдена' });
-                          }
-                        }, 1000);
-                      }, 100);
-                    } else {
-                      console.log('Поле для сопроводительного письма не найдено после нажатия кнопки');
-                      chrome.runtime.sendMessage({ action: 'closeTab', reason: 'поле не найдено' });
-                    }
-                  }, 1500);
-                }, 2000);
-              },
-              args: [{ resumeName: selectedResume, coverLetter: CONFIG.coverLetter }]
-            });
-} catch (error) {
-            console.log('Ошибка при инжектировании скрипта модального окна: ' + error.message);
-            await chrome.tabs.remove(vacancyDetailTab.id);
-          }
-        } catch (error) {
-          console.log('Ошибка при обработке вакансии: ' + error.message);
-          try {
-            await chrome.tabs.remove(vacancyDetailTab.id);
-          } catch (e) {
-            console.log('Не удалось закрыть вкладку: ' + e.message);
-          }
-        }
-      }
-      
-      await chrome.tabs.remove(vacancyTab.id);
-      await chrome.tabs.remove(currentResumeTab.id);
-      console.log('Закрыл вкладки для резюме = ' + currentResumeName + ' =');
-    }
-    
-    console.log('=== Работа завершена ===');
-    
-  } catch (error) {
-    console.error('Ошибка:', error.message);
-    console.error('Стек:', error.stack);
+    })();
+    return true; // <-- ВАЖНО: возвращаем true для асинхронного ответа
   }
-}
-
-// При клике на иконку - запускаем автоматизацию
-chrome.action.onClicked.addListener(async (tab) => {
-  console.log('=НАЧАЛО=. был клик по иконке');
-  await startAutomation();
 });

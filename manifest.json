@@ -1,14 +1,25 @@
 {
   "manifest_version": 3,
   "name": "HH Auto Response",
-  "version": "1.0",
-  "description": "Auto responses on hh.ru",
-  "permissions": ["activeTab", "scripting", "tabs"],
-  "host_permissions": ["*://*.hh.ru/*"],
+  "version": "2.5",
+  "description": "Автоматический сбор вакансий, ранжирование через DeepSeek",
+  "permissions": ["activeTab", "scripting", "tabs", "storage", "contextMenus"],
+  "host_permissions": [
+    "*://*.hh.ru/*",
+    "http://localhost:8000/*",
+    "https://api.deepseek.com/*"
+  ],
   "action": {
-    "default_title": "Run HH Auto"
+    "default_title": "Запустить HH Auto (правый клик — остановить)"
   },
   "background": {
     "service_worker": "background.js"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.hh.ru/*"],
+      "js": ["main.js"],
+      "run_at": "document_idle"
+    }
+  ]
 }
