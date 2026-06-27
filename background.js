@@ -3,7 +3,7 @@
 const CONFIG = {
   minDelay: 2000,
   maxDelay: 4000,
-  maxVacancies: 15,
+  maxVacancies: 150,
   doneDelay: 12000,
   excludeKeywords: ['разработчик', 'реклам'],
   coverLetter: `Добрый день.
