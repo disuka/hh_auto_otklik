@@ -118,7 +118,7 @@ async function migrateSettings() {
   return DEFAULT_SETTINGS;
 }
 
-async function stopExtension(tabId) {
+async function stopExtension(tabId, shouldLog = true) {
   await chrome.storage.local.remove([
     'hhState', 'hhStateTimestamp', 'processStartTime',
     'currentPage', 'allVacancies', 'maxPages',
@@ -127,7 +127,9 @@ async function stopExtension(tabId) {
     'responseVacancyUrl', 'responseVacancyData', 'searchTabId',
     'multipleVacanciesList', 'currentMultipleIndex'
   ]);
-  await sendLog('info', 'РАСШИРЕНИЕ ОСТАНОВЛЕНО ПОЛЬЗОВАТЕЛЕМ', {});
+  if (shouldLog) {
+    await sendLog('info', 'РАСШИРЕНИЕ ОСТАНОВЛЕНО ПОЛЬЗОВАТЕЛЕМ', {});
+  }
   if (tabId) {
     chrome.tabs.reload(tabId);
   }
@@ -143,13 +145,14 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === "stop_hh_auto") {
-    await stopExtension(tab.id);
+    await stopExtension(tab.id, true);
   }
 });
 
 chrome.action.onClicked.addListener(async (tab) => {
+  // Устанавливаем флаг ручного запуска (без временной метки)
   await chrome.storage.local.set({ manualStart: true });
-  await stopExtension(tab.id);
+  await stopExtension(tab.id, false);
   currentSessionId = generateSessionId();
   await chrome.storage.local.set({ sessionId: currentSessionId });
   const healthy = await isLogServerHealthy();
@@ -458,7 +461,6 @@ ${JSON.stringify(cleanedToRank, null, 2)}
     return true;
   }
 
-  // ===== ОБРАБОТЧИК ЗАПРОСОВ К ЛОКАЛЬНОЙ LLM (ИСПРАВЛЕН) =====
   if (message.type === 'CALL_LLM') {
     (async () => {
       try {
@@ -494,7 +496,7 @@ JSON-массив:`;
         });
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 секунд таймаут
+        const timeoutId = setTimeout(() => controller.abort(), 60000);
 
         const response = await fetch(endpoint, {
           method: 'POST',
@@ -545,6 +547,6 @@ JSON-массив:`;
         sendResponse({ success: false, error: err.message });
       }
     })();
-    return true; // <-- ВАЖНО: возвращаем true для асинхронного ответа
+    return true;
   }
 });

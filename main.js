@@ -1,23 +1,24 @@
-// main.js (исправленный: корректная проверка startedWithQuestion)
 console.log('main.js loaded');
-
 (async () => {
   console.log('main.js async started');
 
+  // Проверка флага ручного запуска
   const { manualStart } = await chrome.storage.local.get('manualStart');
   if (!manualStart) {
     console.log('Расширение не запущено вручную, пропускаем');
     return;
   }
-  console.log('Ручной запуск подтверждён, флаг оставляем до завершения');
 
+  // Проверка состояния – если нет hhState или оно завершено, удаляем manualStart и выходим
   const localState = await chrome.storage.local.get(['hhState', 'errorMessage']);
   let hhState = localState.hhState;
   if (!hhState || hhState === 'finished' || hhState === 'error') {
-    console.log('Состояние неактивно, завершаем');
+    console.log('Состояние неактивно, удаляем флаг и завершаем');
     await chrome.storage.local.remove('manualStart');
     return;
   }
+
+  console.log('Ручной запуск подтверждён, выполняем');
 
   let settings, sessionId;
   try {
@@ -37,7 +38,7 @@ console.log('main.js loaded');
     return;
   }
 
-  // ---- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----
+  // ---- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (без изменений) ----
   async function sendLog(level, message, metadata = {}) {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({ type: 'LOG', level, message, metadata }, (response) => {
@@ -315,9 +316,10 @@ console.log('main.js loaded');
     await new Promise(r => setTimeout(r, 500));
     let textField = modal.querySelector('textarea, [contenteditable="true"]');
     if (!textField) {
-      await sendLog('error', 'д161 поле ввода текста сопроводительного не найдено', {});
+      await sendLog('debug', 'д161 нажал кнопку добавления сопровод ', { result: 'д161 поле ввода текста сопроводительного не найдено' });
       throw new Error('Поле ввода сопроводительного письма не найдено');
     }
+    await sendLog('debug', 'д161 нажал кнопку добавления сопровод ', { result: 'найдено поле ввода сопроводительного' });
     if (textField.tagName === 'TEXTAREA') {
       textField.value = coverLetterText;
       textField.dispatchEvent(new Event('input', { bubbles: true }));
@@ -472,8 +474,7 @@ console.log('main.js loaded');
     await new Promise(r => setTimeout(r, 4000));
   }
 
-  // ---------- ИСПРАВЛЕННАЯ ФУНКЦИЯ ОБРАБОТКИ ДОП. ВОПРОСОВ (ПО ПОРЯДКУ) ----------
-  async function processQuestionsPage(searchTabId, searchUrl) {
+  async function processQuestionsPage() {
     await sendLog('info', 'д15 доп вопросы', { url: window.location.href });
 
     function isInsideLetterBlock(el) {
@@ -482,29 +483,32 @@ console.log('main.js loaded');
 
     function getQuestionFromParent(el) {
       let parent = el.parentElement;
-      for (let i = 0; i < 8 && parent && parent !== document.body; i++) {
+      for (let i = 0; i < 10 && parent && parent !== document.body; i++) {
         let text = parent.innerText ? parent.innerText.replace(/\s+/g, ' ').trim() : '';
-        if (text.length > 30) {
-          if (/^(Да|Нет|Свой вариант|Выбрать|Вариант|Устраивает|Полностью|Частично|Нет,|Да,)/i.test(text)) {
-            parent = parent.parentElement;
-            continue;
-          }
-          let words = text.split(/\s+/);
-          if (words.length <= 4 && words.every(w => /^(да|нет|свой|вариант|устраивает|полностью|частично)$/i.test(w))) {
-            parent = parent.parentElement;
-            continue;
-          }
-          let clean = text.replace(/\s*(Да|Нет|Свой вариант|Выбрать|Укажите|Отметьте|Вариант|Полностью|Частично)\s*$/i, '').trim();
-          if (clean.length > 10) return clean;
+        if (text.length > 10) {
+          let clean = text.replace(/\s*(Да|Нет|Свой вариант|Выбрать|Укажите|Отметьте|Вариант|Полностью|Частично|Да,|Нет,)\s*$/i, '').trim();
+          if (clean.length > 5) return clean;
         }
+        const labelAttr = parent.getAttribute('aria-label') || parent.getAttribute('data-label');
+        if (labelAttr && labelAttr.length > 5) return labelAttr;
         parent = parent.parentElement;
+      }
+      const siblings = el.parentElement?.children;
+      if (siblings) {
+        for (const sibling of siblings) {
+          if (sibling !== el) {
+            const text = sibling.innerText?.trim();
+            if (text && text.length > 5 && !/^(Да|Нет|Свой|Вариант|Укажите|Отметьте|Выбрать)/i.test(text)) {
+              return text;
+            }
+          }
+        }
       }
       return '';
     }
 
     const fields = [];
 
-    // Текстовые поля
     const textInputs = document.querySelectorAll('input[type="text"], input:not([type]), textarea');
     for (const el of textInputs) {
       if (isInsideLetterBlock(el)) continue;
@@ -522,7 +526,6 @@ console.log('main.js loaded');
       });
     }
 
-    // Радио-группы
     const radioGroups = new Map();
     document.querySelectorAll('input[type="radio"]').forEach(radio => {
       if (!radioGroups.has(radio.name)) radioGroups.set(radio.name, []);
@@ -534,7 +537,6 @@ console.log('main.js loaded');
       let question = getQuestionFromParent(firstRadio) || 'Вопрос не определён';
       const lower = question.toLowerCase();
       if (lower.includes('сгенерировать') || lower.includes('откликнуться') || lower.includes('резюме для отклика') || lower.includes('сопроводительное письмо') || lower.includes('добавить') || lower.includes('письмо')) continue;
-      // Исправленный сбор вариантов – ищем label
       const options = radios.map(r => {
         let label = r.closest('label')?.innerText.trim() || r.parentElement.innerText.trim() || r.value;
         return { value: r.value, label: label };
@@ -542,13 +544,11 @@ console.log('main.js loaded');
       fields.push({ type: 'radio', question, name, options, selector: `input[name="${name}"]` });
     }
 
-    // Чекбоксы
     document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
       if (isInsideLetterBlock(cb)) return;
       let question = getQuestionFromParent(cb) || 'Вопрос не определён';
       const lower = question.toLowerCase();
       if (lower.includes('сгенерировать') || lower.includes('откликнуться') || lower.includes('резюме для отклика') || lower.includes('сопроводительное письмо') || lower.includes('добавить') || lower.includes('письмо')) return;
-      // Исправленный сбор label
       let label = cb.closest('label')?.innerText.trim() || cb.parentElement.innerText.trim() || cb.value;
       const selector = cb.id ? `#${cb.id}` : (cb.name ? `input[name="${cb.name}"][value="${cb.value}"]` : cb.tagName.toLowerCase());
       fields.push({
@@ -561,7 +561,6 @@ console.log('main.js loaded');
       });
     });
 
-    // Выпадающие списки
     document.querySelectorAll('select').forEach(sel => {
       if (isInsideLetterBlock(sel)) return;
       let question = getQuestionFromParent(sel) || 'Вопрос не определён';
@@ -577,29 +576,20 @@ console.log('main.js loaded');
       return false;
     }
 
-    // Отправляем в LLM
     const response = await new Promise(resolve => {
       chrome.runtime.sendMessage({ type: 'CALL_LLM', fields, endpoint: settings.localLLMEndpoint }, resolve);
     });
 
-    // Проверка, что ответ получен
-    if (!response) {
-      await sendLog('error', 'д15 ответ от background не получен (undefined)', {});
-      return false;
-    }
-
-    if (!response.success) {
-      if (response.invalidJson) {
+    if (!response || !response.success) {
+      if (response?.invalidJson) {
         await sendLog('error', 'д15 непонятный ответ от локальной llm', { request: response.request, responseText: response.content });
       } else {
-        await sendLog('error', `д15 Ошибка при вызове локальной LLM: ${response.error}`, { request: { fields, endpoint: settings.localLLMEndpoint } });
+        await sendLog('error', `д15 Ошибка при вызове локальной LLM: ${response?.error || 'unknown'}`, { request: { fields, endpoint: settings.localLLMEndpoint } });
       }
       return false;
     }
 
     const llmResponse = response.answers;
-
-    // Заполняем поля по порядку (индекс ответа соответствует индексу поля)
     for (let i = 0; i < llmResponse.length && i < fields.length; i++) {
       const ans = llmResponse[i];
       const field = fields[i];
@@ -617,13 +607,10 @@ console.log('main.js loaded');
       } else if (field.type === 'checkbox') {
         const answerArray = Array.isArray(ans.answer) ? ans.answer : [ans.answer];
         for (const val of answerArray) {
-          // Ищем чекбокс по label или value
           let cb = null;
           if (field.selector.includes('[value="')) {
-            // Ищем точное совпадение value
             cb = document.querySelector(field.selector.replace(/\[value="[^"]*"\]/, `[value="${val}"]`));
           } else {
-            // Ищем по label
             const allCbs = document.querySelectorAll(field.selector);
             for (const c of allCbs) {
               const labelEl = c.closest('label');
@@ -714,6 +701,7 @@ console.log('main.js loaded');
       if (!profileElement) {
         await sendLog('error', 'д4 не залогинен', { url: window.location.href });
         await chrome.storage.local.set({ hhState: 'error', errorMessage: 'User not logged in', hhStateTimestamp: Date.now() });
+        await chrome.storage.local.remove('manualStart');
         return;
       }
       await sendLog('info', 'д3 залогинен', { url: window.location.href });
@@ -730,6 +718,7 @@ console.log('main.js loaded');
       } else {
         await sendLog('error', 'не удалось определить URL для перехода', { url: window.location.href });
         await chrome.storage.local.set({ hhState: 'error', errorMessage: 'No resume page URL', hhStateTimestamp: Date.now() });
+        await chrome.storage.local.remove('manualStart');
       }
       return;
     }
@@ -895,37 +884,24 @@ console.log('main.js loaded');
       const currentUrl = window.location.href;
       const isTestVacancy = settings.test_vacancy && settings.test_vacancy.trim() !== '';
 
-      // Исправленный блок обработки страницы отклика
       if (currentUrl.includes('/applicant/vacancy_response')) {
         let questionsProcessed = false;
-        // Правильно определяем, есть ли вопросы: параметр startedWithQuestion=true
-        const hasQuestions = currentUrl.includes('startedWithQuestion=true') || (currentUrl.includes('startedWithQuestion') && !currentUrl.includes('startedWithQuestion=false'));
+        const hasQuestions = currentUrl.includes('startedWithQuestion');
         if (hasQuestions) {
           if (settings.useLocalLLM) {
-            questionsProcessed = await processQuestionsPage(searchTabId, searchUrl);
-            if (!questionsProcessed) await sendLog('error', 'Не удалось обработать страницу с вопросами, пропускаем вакансию');
+            questionsProcessed = await processQuestionsPage();
+            if (!questionsProcessed) {
+              await sendLog('error', 'Не удалось обработать страницу с вопросами, останавливаемся');
+              await chrome.storage.local.set({ hhState: 'error', errorMessage: 'Failed to process questions', hhStateTimestamp: Date.now() });
+              await chrome.storage.local.remove('manualStart');
+              return;
+            }
           } else {
             await sendLog('info', 'д15 доп вопросы (LLM отключена, пропускаем)', { url: window.location.href });
           }
         } else {
           await sendLog('debug', 'Страница отклика без вопросов, пропускаем Д15', { url: window.location.href });
         }
-        // Если есть вопросы и они не обработаны – пропускаем вакансию
-        if (hasQuestions && !questionsProcessed && settings.useLocalLLM) {
-          const newIndex = currentMultipleIndex + 1;
-          await chrome.storage.local.set({ currentMultipleIndex: newIndex });
-          const currentTabId = await getCurrentTabId();
-          if (currentTabId) await closeVacancyTab(currentTabId);
-          if (searchTabId) {
-            chrome.tabs.update(searchTabId, { active: true }, () => { chrome.tabs.reload(searchTabId); });
-          } else if (searchUrl) {
-            await openInNewTab(searchUrl);
-          } else {
-            window.location.reload();
-          }
-          return;
-        }
-        // Если вопросов нет или они обработаны – продолжаем
         await processCoverLetterBlock();
         await processResumeSelection();
         let typeForLog = 'страница';
