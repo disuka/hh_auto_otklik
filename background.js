@@ -2,12 +2,12 @@
 const DEFAULT_SETTINGS = {
   minDelaySec: 3,
   maxDelaySec: 9,
-  maxPages: 1,
-  maxVacanciesToProcess: 23,
+  maxPages: 2,                     // по ТЗ – 2
+  maxVacanciesToProcess: 4,        // по ТЗ – 4
   rank_deepseek: 0,
   deepseek_timeout: 60,
   deepseek_refresh: 3,
-  test_vacancy: 'https://vidnoe.hh.ru/vacancy/133953200?hhtmFrom=vacancy_response',
+  test_vacancy: 'https://vidnoe.hh.ru/vacancy/134043272?hhtmFrom=vacancy_response',                // по ТЗ – пустая строка
   modalWaitSec: 2,
   waitForResponseSec: 10,
   logUrl: 'http://localhost:8000/api/v1/logs',
@@ -71,6 +71,7 @@ async function isLogServerHealthy() {
 }
 
 async function getConfigViaHttp() {
+  await sendLog('info', 'д0 начинаю запрос параметров по http', {});
   const token = DEFAULT_SETTINGS.token_dlya_get_config;
   const baseUrl = 'http://localhost:8080/get-value';
   const keys = [
@@ -150,7 +151,6 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 });
 
 chrome.action.onClicked.addListener(async (tab) => {
-  // Устанавливаем флаг ручного запуска (без временной метки)
   await chrome.storage.local.set({ manualStart: true });
   await stopExtension(tab.id, false);
   currentSessionId = generateSessionId();
@@ -364,6 +364,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  // Ранжирование вакансий
   if (message.type === 'RANK_VACANCIES') {
     (async () => {
       try {
@@ -461,6 +462,7 @@ ${JSON.stringify(cleanedToRank, null, 2)}
     return true;
   }
 
+  // Вызов локальной LLM
   if (message.type === 'CALL_LLM') {
     (async () => {
       try {
@@ -469,24 +471,25 @@ ${JSON.stringify(cleanedToRank, null, 2)}
         const coverLetter = currentSettings?.coverLetter || '';
         const extra_data = currentSettings?.extra_data || '';
 
-        const prompt = `Ответь на вопросы, используя только данные из резюме, сопроводительного письма и доп. информации. Верни JSON-массив.
-
-Пример правильного ответа:
-[{"question": "Укажите зарплатные ожидания", "answer": "300000"}]
+        const prompt = `Ты – помощник соискателя. На основе резюме кандидата ответь на вопросы.
+Ответы должны быть правдивыми, краткими. Для radio – выбери один из вариантов.
+Для checkbox – выбери подходящие (массив). Для text/textarea – напиши ответ строкой.
 
 Резюме:
 ${resume_text}
 
-Письмо:
+Сопроводительное письмо:
 ${coverLetter}
 
-Доп.инфо:
+Доп. инфо:
 ${extra_data}
 
 Вопросы:
 ${JSON.stringify(fields, null, 2)}
 
-JSON-массив:`;
+Верни только JSON в формате:
+[{"question": "текст вопроса", "answer": "ответ или массив ответов"}].
+Не добавляй пояснений.`;
 
         await sendLog('debug', 'д15 отправка в локальную llm', {
           endpoint,
@@ -503,10 +506,10 @@ JSON-массив:`;
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             prompt: prompt,
-            max_tokens: 512,
-            temperature: 0.0,
-            top_p: 0.0,
-            stop: ['<|im_end|>']
+            max_tokens: 2000,
+            temperature: 0.3,
+            top_p: 0.9,
+            stop: ['</s>', '<|im_end|>']
           }),
           signal: controller.signal
         });
